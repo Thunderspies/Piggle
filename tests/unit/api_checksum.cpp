@@ -1,0 +1,469 @@
+#include "../api_test.hpp"
+#include "../../src/digest.hpp"
+
+namespace {
+
+static const unsigned char encoded[] = {0x78, 0x9c, 0xcb, 0xcd, 0x2c,
+	0x2e, 0xce, 0xcc, 0xcf, 0x53, 0x28, 0x48, 0xac, 0xcc, 0xc9,
+	0x4f, 0x4c, 0x51, 0xc8, 0xc5, 0xcf, 0x07, 0x00, 0xbb, 0x39,
+	0x12, 0x65};
+static const unsigned char stored_digest[] = {0xb2, 0x34, 0x88, 0xc3};
+
+static int checksum_contract()
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *source = NULL, *wrong = NULL;
+	pg_file *file = NULL;
+	pg_writer *writer = NULL;
+	pg_reader *reader = NULL;
+	pg_archive_options create = {PG_HOGG10, 0, PG_CHECKSUM_STORED};
+	pg_source_options open = {
+		PG_HOGG10, PG_WRITE, PG_CHECKSUM_STORED};
+	pg_write_options write;
+	pg_file_info info;
+	pg_error error;
+	unsigned char bytes[128];
+	size_t count;
+
+	PG_CHECK(!clear_file("mission.hogg"));
+	PG_CHECK(!clear_file("logical.pigg"));
+	PG_CHECK(!clear_file("exported"));
+	PG_STATUS(pg_context_open(&context, &error), PG_OK);
+	PG_STATUS(pg_archive_builder_create_options(context,
+				"mission.hogg", &create, &builder, &error),
+		PG_OK);
+	pg_write_options_init(&write, 47);
+	write.encoding = PG_ZLIB;
+	write.input_size = sizeof(encoded);
+	write.entry.digest_kind = PG_DIGEST_MD5_32;
+	write.entry.expected_digest_domain = PG_CHECKSUM_STORED;
+	memcpy(write.entry.expected_digest, stored_digest, 4);
+	PG_STATUS(pg_writer_open_archive_builder(
+				builder, "arc", &write, &writer, &error),
+		PG_OK);
+	PG_STATUS(pg_writer_write(writer, encoded, sizeof(encoded),
+				&count, &error),
+		PG_OK);
+	PG_STATUS(pg_writer_finish(writer, &error), PG_OK);
+	PG_STATUS(pg_writer_close(&writer, &error), PG_OK);
+	PG_STATUS(pg_archive_builder_finish(builder, &error), PG_OK);
+	PG_STATUS(pg_archive_builder_close(&builder, &error), PG_OK);
+	PG_STATUS(pg_source_open(context, "mission.hogg", &open,
+				&source, &error),
+		PG_OK);
+	PG_STATUS(pg_source_validate(source, &error), PG_OK);
+	PG_STATUS(pg_source_find(source, "arc", &file, &error), PG_OK);
+	PG_STATUS(pg_file_inspect(file, &info, &error), PG_OK);
+	PG_CHECK(info.checksum_domain == PG_CHECKSUM_STORED);
+	PG_CHECK(!memcmp(info.digest, stored_digest, 4));
+	for (uint32_t mode = PG_READ_LOGICAL; mode <= PG_READ_STORED;
+		mode++) {
+		PG_STATUS(pg_reader_open(file, mode, &reader, &error),
+			PG_OK);
+		PG_STATUS(pg_reader_read(reader, bytes, sizeof(bytes),
+					&count, &error),
+			PG_OK);
+		PG_CHECK(count ==
+			(mode == PG_READ_LOGICAL ? 47
+							: sizeof(encoded)));
+		PG_STATUS(pg_reader_read(reader, bytes, sizeof(bytes),
+					&count, &error),
+			PG_END);
+		PG_STATUS(pg_reader_close(&reader, &error), PG_OK);
+	}
+	PG_STATUS(pg_file_export(file, "exported", 0, &error), PG_OK);
+	PG_CHECK(!expect_bytes("exported",
+		"mission payload mission payload "
+		"mission payload",
+		47));
+	PG_STATUS(pg_archive_builder_create(context, "logical.pigg",
+				PG_PIGG2, 0, &builder, &error),
+		PG_OK);
+	PG_STATUS(pg_archive_builder_copy(builder, "arc", file,
+				PG_COMPRESS_FORCE, &error),
+		PG_OK);
+	PG_STATUS(pg_archive_builder_finish(builder, &error), PG_OK);
+	PG_STATUS(pg_archive_builder_close(&builder, &error), PG_OK);
+	pg_source_options logical_write = {PG_PIGG2, PG_WRITE, 0};
+	pg_pack_options pack = {
+		PG_COMPRESS_FORCE, 0, PG_CHECKSUM_STORED};
+
+	PG_STATUS(pg_source_open(context, "logical.pigg",
+				&logical_write, &wrong, &error),
+		PG_OK);
+	PG_STATUS(pg_source_copy(wrong, "copy", file, PG_COMPRESS_FORCE,
+				&error),
+		PG_OK);
+	PG_STATUS(pg_source_validate(wrong, &error), PG_OK);
+	PG_STATUS(pg_source_close(&wrong, &error), PG_OK);
+	PG_CHECK(!clear_file("packed.hogg"));
+	PG_STATUS(pg_source_pack(source, "packed.hogg", PG_HOGG10,
+				&pack, &error),
+		PG_OK);
+	PG_STATUS(pg_source_open(context, "packed.hogg", &open, &wrong,
+				&error),
+		PG_OK);
+	PG_STATUS(pg_source_validate(wrong, &error), PG_OK);
+	PG_STATUS(pg_source_close(&wrong, &error), PG_OK);
+	PG_STATUS(pg_file_close(&file, &error), PG_OK);
+	PG_STATUS(pg_source_write_all(
+				source, "new", "new", 3, NULL, &error),
+		PG_OK);
+	PG_STATUS(pg_source_validate(source, &error), PG_OK);
+	PG_STATUS(pg_source_close(&source, &error), PG_OK);
+	PG_STATUS(pg_source_open(context, "mission.hogg", NULL, &wrong,
+				&error),
+		PG_OK);
+	PG_STATUS(pg_source_validate(wrong, &error), PG_CHECKSUM);
+	PG_STATUS(pg_source_close(&wrong, &error), PG_OK);
+	PG_STATUS(pg_source_open(context, "logical.pigg", NULL, &source,
+				&error),
+		PG_OK);
+	PG_STATUS(pg_source_validate(source, &error), PG_OK);
+	PG_STATUS(pg_source_close(&source, &error), PG_OK);
+	open.checksum_domain = 2;
+	PG_STATUS(pg_source_open(context, "logical.pigg", &open,
+				&source, &error),
+		PG_INVALID);
+	create.format = PG_PIGG2;
+	PG_STATUS(pg_archive_builder_create_options(context, "invalid",
+				&create, &builder, &error),
+		PG_UNSUPPORTED);
+	PG_STATUS(pg_context_close(&context, &error), PG_OK);
+	return 0;
+}
+
+using ApiChecksum = piggle_test::ContractTest;
+
+TEST_F(ApiChecksum, api_checksum)
+{
+	ASSERT_EQ(0, checksum_contract());
+}
+
+static void sequential_read(pg_source *source, const char *name,
+		uint32_t mode, const unsigned char *data)
+{
+	pg_reader *reader = NULL;
+	pg_reader_info info = {};
+
+	ASSERT_EQ(PG_OK, pg_reader_open_source(source, name, mode,
+		&reader, NULL));
+	ASSERT_EQ(PG_OK, pg_reader_inspect(reader, &info, NULL));
+	uint64_t total = 0;
+	unsigned char bytes[17];
+	size_t count = 0;
+
+	for (;;) {
+		pg_status status = pg_reader_read(reader, bytes, sizeof(bytes),
+			&count, NULL);
+
+		if (status == PG_END)
+			break;
+		ASSERT_EQ(PG_OK, status);
+		if (mode != PG_READ_STORED) {
+			EXPECT_EQ(0, memcmp(bytes, data + total, count));
+		}
+		total += count;
+	}
+	EXPECT_EQ(info.size, total);
+	ASSERT_EQ(PG_END, pg_reader_read(reader, bytes, sizeof(bytes),
+		&count, NULL));
+	EXPECT_EQ(0u, count);
+	ASSERT_EQ(PG_OK, pg_reader_close(&reader, NULL));
+}
+
+TEST_F(ApiChecksum, SequentialChunksVerifyEveryCheckedRepresentation)
+{
+	pg_archive_options configs[] = {
+		{PG_PIGG2, 0, PG_CHECKSUM_LOGICAL},
+		{PG_HOGG10, 0, PG_CHECKSUM_LOGICAL},
+		{PG_HOGG10, 0, PG_CHECKSUM_STORED},
+	};
+
+	for (const auto &config : configs) {
+		for (uint32_t compression :
+				{PG_COMPRESS_NEVER, PG_COMPRESS_FORCE}) {
+			pg_context *context = NULL;
+			pg_archive_builder *builder = NULL;
+			pg_source *source = NULL;
+			pg_source_options open = {config.format, PG_READ,
+				config.checksum_domain};
+			pg_entry_options entry = {};
+
+			entry.compression = compression;
+			entry.cached_header_policy = PG_HEADER_CACHE_NONE;
+			ASSERT_EQ(0, clear_file("sequential"));
+			ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+			ASSERT_EQ(PG_OK, pg_archive_builder_create_options(
+				context, "sequential", &config, &builder,
+				NULL));
+			std::vector<unsigned char> data(131077);
+
+			for (size_t i = 0; i < data.size(); i++)
+				data[i] = (unsigned char)(i * 37 + i / 251);
+			for (const char *name : {"empty", "data"}) {
+				size_t size = !strcmp(name, "empty")
+					? 0 : data.size();
+
+				ASSERT_EQ(PG_OK, pg_archive_builder_write_all(
+					builder, name, data.data(), size,
+					&entry, NULL));
+			}
+			ASSERT_EQ(PG_OK,
+				pg_archive_builder_finish(builder, NULL));
+			ASSERT_EQ(PG_OK,
+				pg_archive_builder_close(&builder, NULL));
+			ASSERT_EQ(PG_OK, pg_source_open(context, "sequential",
+				&open, &source, NULL));
+			for (const char *name : {"empty", "data"}) {
+				for (uint32_t mode : {PG_READ_LOGICAL,
+						PG_READ_LOGICAL_PAYLOAD,
+						PG_READ_STORED})
+					sequential_read(source, name, mode,
+						data.data());
+			}
+			ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+			ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+		}
+	}
+}
+
+} // namespace
+
+TEST_F(ApiChecksum, StoredTransferSkipsPayloadValidation)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *source = NULL;
+	pg_reader *reader = NULL;
+	pg_writer *writer = NULL;
+	pg_error error;
+	pg_stored_write_options options = {};
+
+	ASSERT_EQ(pg_context_open(&context, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_create(context, "unchecked.hogg",
+		PG_HOGG10, 0, &builder, &error), PG_OK);
+	options.logical_size = 100;
+	options.stored_size = 3;
+	options.encoding = PG_ZLIB;
+	options.digest_kind = PG_DIGEST_MD5_32;
+	options.digest[0] = 42;
+	ASSERT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_OK);
+	size_t count = 0;
+
+	EXPECT_EQ(pg_writer_write(writer, "bad!", 4, &count, &error),
+		PG_INVALID);
+	EXPECT_EQ(count, 0u);
+	ASSERT_EQ(pg_writer_write(writer, "bad", 3, &count, &error), PG_OK);
+	ASSERT_EQ(pg_writer_finish(writer, &error), PG_OK);
+	ASSERT_EQ(pg_writer_close(&writer, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_finish(builder, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_close(&builder, &error), PG_OK);
+	ASSERT_EQ(pg_source_open(context, "unchecked.hogg", NULL,
+		&source, &error), PG_OK);
+	ASSERT_EQ(pg_reader_open_source(source, "a", PG_READ_STORED_UNCHECKED,
+		&reader, &error), PG_OK);
+	pg_reader_info info = {};
+	char bytes[8] = {};
+
+	ASSERT_EQ(pg_reader_inspect(reader, &info, &error), PG_OK);
+	EXPECT_EQ(info.size, 3u);
+	EXPECT_EQ(info.encoding, PG_ZLIB);
+	ASSERT_EQ(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+		&error), PG_OK);
+	EXPECT_EQ(count, 3u);
+	EXPECT_EQ(memcmp(bytes, "bad", 3), 0);
+	ASSERT_EQ(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+		&error), PG_END);
+	ASSERT_EQ(pg_reader_seek(reader, 1, &error), PG_OK);
+	ASSERT_EQ(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+		&error), PG_OK);
+	EXPECT_EQ(count, 2u);
+	ASSERT_EQ(pg_reader_close(&reader, &error), PG_OK);
+	ASSERT_EQ(pg_reader_open_source(source, "a", PG_READ_STORED,
+		&reader, &error), PG_OK);
+	EXPECT_EQ(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+		&error), PG_CORRUPT);
+	ASSERT_EQ(pg_reader_close(&reader, &error), PG_OK);
+	ASSERT_EQ(pg_source_close(&source, &error), PG_OK);
+	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
+}
+
+TEST_F(ApiChecksum, CheckedStreamsRejectTrailersLengthsAndWrongDigests)
+{
+	pg_archive_options configs[] = {
+		{PG_PIGG2, 0, PG_CHECKSUM_LOGICAL},
+		{PG_HOGG10, 0, PG_CHECKSUM_LOGICAL},
+		{PG_HOGG10, 0, PG_CHECKSUM_STORED},
+	};
+
+	for (const auto &config : configs) {
+		for (int fault = 0; fault < 4; fault++) {
+			pg_context *context = NULL;
+			pg_archive_builder *builder = NULL;
+			pg_source *source = NULL;
+			pg_writer *writer = NULL;
+			std::vector<unsigned char> input(encoded,
+				encoded + sizeof(encoded));
+
+			if (fault == 0)
+				input.push_back(0);
+			if (fault == 1)
+				input.pop_back();
+			pg_stored_write_options options = {};
+
+			options.logical_size = fault == 2 ? 46 : 47;
+			options.stored_size = input.size();
+			options.encoding = PG_ZLIB;
+			options.checksum_domain = config.checksum_domain;
+			options.digest_kind = config.format == PG_PIGG2
+				? PG_DIGEST_MD5 : PG_DIGEST_MD5_32;
+			options.digest[0] = fault == 3 ? 1 : 0;
+			ASSERT_EQ(0, clear_file("bad-stream"));
+			ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+			ASSERT_EQ(PG_OK, pg_archive_builder_create_options(
+				context, "bad-stream", &config, &builder,
+				NULL));
+			ASSERT_EQ(PG_OK, pg_writer_open_archive_builder_stored(
+				builder, "file", &options, &writer, NULL));
+			size_t count = 0;
+
+			ASSERT_EQ(PG_OK, pg_writer_write(writer, input.data(),
+				input.size(), &count, NULL));
+			ASSERT_EQ(PG_OK, pg_writer_finish(writer, NULL));
+			ASSERT_EQ(PG_OK, pg_writer_close(&writer, NULL));
+			ASSERT_EQ(PG_OK,
+				pg_archive_builder_finish(builder, NULL));
+			ASSERT_EQ(PG_OK,
+				pg_archive_builder_close(&builder, NULL));
+			pg_source_options open = {config.format, PG_READ,
+				config.checksum_domain};
+
+			ASSERT_EQ(PG_OK, pg_source_open(context, "bad-stream",
+				&open, &source, NULL));
+			for (uint32_t mode : {PG_READ_LOGICAL_PAYLOAD,
+					PG_READ_STORED}) {
+				pg_reader *reader = NULL;
+				unsigned char bytes[3];
+
+				ASSERT_EQ(PG_OK, pg_reader_open_source(source,
+					"file", mode, &reader, NULL));
+				ASSERT_EQ(PG_OK, pg_reader_read(reader, bytes,
+					1, &count, NULL));
+				ASSERT_EQ(PG_OK,
+					pg_reader_close(&reader, NULL));
+				ASSERT_EQ(PG_OK, pg_reader_open_source(source,
+					"file", mode, &reader, NULL));
+				pg_status status = PG_OK;
+				size_t total = 0;
+
+				while (status == PG_OK) {
+					status = pg_reader_read(reader, bytes,
+						sizeof(bytes), &count, NULL);
+					total += count;
+				}
+				EXPECT_EQ(fault == 3 ? PG_CHECKSUM : PG_CORRUPT,
+					status);
+				if (mode == PG_READ_STORED) {
+					EXPECT_EQ(input.size(), total);
+				}
+				EXPECT_EQ(PG_INVALID, pg_reader_read(reader,
+					bytes, sizeof(bytes), &count, NULL));
+				EXPECT_EQ(0u, count);
+				ASSERT_EQ(PG_OK,
+					pg_reader_close(&reader, NULL));
+			}
+			ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+			ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+		}
+	}
+}
+
+TEST_F(ApiChecksum, StoredWriterValidatesMetadataAndExactLength)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_writer *writer = NULL;
+	pg_error error;
+	pg_stored_write_options options = {};
+
+	ASSERT_EQ(pg_context_open(&context, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_create(context, "stored.pigg",
+		PG_PIGG2, 0, &builder, &error), PG_OK);
+	options.logical_size = options.stored_size = 3;
+	options.digest_kind = PG_DIGEST_MD5_32;
+	EXPECT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_INVALID);
+	options.digest_kind = PG_DIGEST_MD5;
+	options.checksum_domain = PG_CHECKSUM_STORED;
+	EXPECT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_INVALID);
+	options.checksum_domain = PG_CHECKSUM_LOGICAL;
+	options.stored_size = 2;
+	EXPECT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_INVALID);
+	options.encoding = PG_ZLIB;
+	options.stored_size = 0;
+	EXPECT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_INVALID);
+	options.encoding = PG_LOGICAL;
+	options.stored_size = 3;
+	ASSERT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_OK);
+	EXPECT_EQ(pg_writer_finish(writer, &error), PG_INVALID);
+	ASSERT_EQ(pg_writer_close(&writer, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_close(&builder, &error), PG_OK);
+	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
+}
+
+TEST(PiggleDigest, Md5BoundariesAndFragmentedInputMatchKnownDigests)
+{
+	struct Example {
+		size_t size;
+		const char *digest;
+	};
+	const Example examples[] = {
+		{0, "d41d8cd98f00b204e9800998ecf8427e"},
+		{1, "47ed733b8d10be225eceba344d533586"},
+		{55, "96799d8bf84d94466fb1d4785f0eae6c"},
+		{56, "bf9c6bb58c938814a38d99d564393a53"},
+		{57, "9eb14617df5fd442bf0c75940836ac23"},
+		{63, "35692891f16306d06ba365a887de5dd3"},
+		{64, "c99cacee8808c930ea7a2a5f79a58599"},
+		{65, "99f97c2c46e2953fc2c2b315db172a78"},
+		{127, "ae30800159a9a3dd3fa3ec647f999692"},
+		{128, "11e4554b8031fd4aa009f2ca792f8989"},
+		{129, "af698300cb8bcf22d7a903741a5c394a"},
+		{4095, "dbec2b17222932e5583877a09e4b1c5d"},
+		{4096, "80e547b2fc782d962dde5487af2bb685"},
+		{4097, "c6ef54af268e52063f9684ca4fa46015"},
+		{1048576, "54bcef79844d9e6e503c1692339f1d45"},
+	};
+
+	for (const auto &example : examples) {
+		std::vector<unsigned char> bytes(example.size);
+		for (size_t i = 0; i < bytes.size(); ++i)
+			bytes[i] = (unsigned char)((i * 131 + 17) & 255);
+		for (size_t chunk : {1u, 7u, 63u, 64u, 65u, 1024u}) {
+			pg_md5 hash;
+			pg_md5_init(&hash);
+			pg_md5_update(&hash, NULL, 0);
+			for (size_t offset = 0; offset < bytes.size();) {
+				size_t count = std::min(
+					chunk, bytes.size() - offset);
+				pg_md5_update(
+					&hash, bytes.data() + offset, count);
+				offset += count;
+			}
+			unsigned char digest[16];
+			char actual[33];
+			pg_md5_finish(&hash, digest);
+			for (size_t i = 0; i < 16; ++i)
+				snprintf(actual + 2 * i, 3, "%02x", digest[i]);
+			EXPECT_STREQ(actual, example.digest) << example.size
+				<< " bytes in chunks of " << chunk;
+		}
+	}
+}
