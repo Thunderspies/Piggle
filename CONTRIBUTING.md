@@ -18,8 +18,6 @@ Follow the [Linux kernel coding style][style] with these extra restrictions.
   - Never at the start of a line
   - Never for indenting
 
-Since this is inherited code, only new code needs to follow this style guide.
-
 [style]: https://docs.kernel.org/process/coding-style.html
 
 # Commits
