@@ -1248,7 +1248,7 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 extern "C" pg_status pg_source_rebind_root(pg_source *source,
 		int *changed, pg_root_binding **saved, pg_error *error)
 {
-	struct stat current, opened;
+	struct stat current, opened = {};
 	int fd = -1;
 
 	*changed = 0;
