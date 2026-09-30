@@ -167,6 +167,8 @@ static inline int pg_native_stat_same(const struct stat *before,
 		&& before->st_mtim.tv_nsec == after->st_mtim.tv_nsec
 #elif defined(__APPLE__)
 		&& before->st_mtimespec.tv_nsec == after->st_mtimespec.tv_nsec
+#elif defined(_WIN32)
+		&& before->st_mtime_nsec == after->st_mtime_nsec
 #endif
 		;
 }

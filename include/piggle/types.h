@@ -41,7 +41,7 @@ enum {
 	PG_LIMIT, /* Size, ID, count or generation cannot be represented. */
 	PG_UNSUPPORTED, /* Format, profile or native facility unsupported. */
 	PG_CORRUPT, /* Malformed structure or encoded payload. */
-	PG_CHECKSUM, /* Available or expected logical digest mismatch. */
+	PG_CHECKSUM, /* Available or expected digest mismatch. */
 	PG_NO_CHECKSUM, /* Explicit verification has no stored digest. */
 	PG_STALE, /* Captured physical identity/generation changed. */
 	PG_RETRY, /* Could not obtain a stable external observation. */
@@ -95,6 +95,8 @@ enum { PG_AUTO = 0, PG_PIGG2, PG_HOGG10, PG_LOOSE };
 enum { PG_READ = 0, PG_WRITE }; /* Source access, not creation. */
 enum { PG_COMPRESS_AUTO = 0, PG_COMPRESS_NEVER, PG_COMPRESS_FORCE };
 enum { PG_LOGICAL = 0, PG_ZLIB }; /* Write input / stored representation. */
+/* Digest domain is independent of encoding and reader representation. */
+enum { PG_CHECKSUM_LOGICAL = 0, PG_CHECKSUM_STORED };
 enum { PG_DIGEST_NONE = 0, PG_DIGEST_MD5, PG_DIGEST_MD5_32 };
 enum { PG_READ_LOGICAL = 0, PG_READ_STORED }; /* Reader representation. */
 /* Native creation is exclusive by default. Never overwrite links/specials. */
@@ -106,6 +108,7 @@ enum { PG_OVERWRITE = 1u };
 typedef struct pg_source_options {
 	uint32_t format;
 	uint32_t access;
+	uint32_t checksum_domain; /* STORED applies to HOGG user records. */
 } pg_source_options;
 typedef struct pg_source_info {
 	pg_id id;
@@ -113,6 +116,7 @@ typedef struct pg_source_info {
 	const char *native_path; /* Borrowed until source close. */
 	uint32_t format;
 	uint32_t access;
+	uint32_t checksum_domain; /* STORED applies to HOGG user records. */
 } pg_source_info;
 /* Immutable captured metadata. Spans live until the owned file is closed. */
 typedef struct pg_file_info {
@@ -128,6 +132,7 @@ typedef struct pg_file_info {
 	int64_t mtime; /* Signed Unix seconds. */
 	uint32_t encoding;
 	uint32_t digest_kind;
+	uint32_t checksum_domain; /* Domain of the captured archive digest. */
 	uint8_t digest[16]; /* Unused bytes are zero. */
 	const void *cached_header; /* NULL when size is zero. */
 	size_t cached_header_size;
@@ -145,6 +150,7 @@ typedef struct pg_entry_options {
 	uint32_t compression;
 	uint32_t digest_kind;
 	uint8_t expected_digest[16];
+	uint32_t expected_digest_domain; /* LOGICAL or final STORED bytes. */
 	const char *original_name;
 	const void *cached_header;
 	size_t cached_header_size;
@@ -168,7 +174,17 @@ PG_API void PG_CALL pg_write_options_init(pg_write_options *out,
 typedef struct pg_pack_options {
 	uint32_t compression;
 	uint32_t flags; /* Zero or OVERWRITE only. */
+	uint32_t checksum_domain; /* Destination archive profile. */
 } pg_pack_options;
+
+/* Explicit archive creation profile; zero checksum domain is LOGICAL.
+ * format must be PIGG2/HOGG10; flags zero/OVERWRITE. STORED is HOGG-only.
+ */
+typedef struct pg_archive_options {
+	uint32_t format;
+	uint32_t flags;
+	uint32_t checksum_domain;
+} pg_archive_options;
 
 /* Reader metadata: size counts bytes exposed by this representation.
  * Native readers are LOGICAL, with size==logical_size and native mtime.

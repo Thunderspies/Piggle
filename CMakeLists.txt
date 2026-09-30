@@ -40,8 +40,11 @@ add_library(piggle
 	src/api.cpp
 	src/archive_builder.cpp
 	src/change.cpp
+	src/entries.cpp
 	src/file.cpp
 	src/io.cpp
+	src/lease.cpp
+	src/managed.cpp
 	src/native_path.cpp
 	src/source.cpp
 	src/tree.cpp

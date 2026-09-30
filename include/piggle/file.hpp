@@ -6,6 +6,11 @@
 
 namespace piggle
 {
+using ::pg_metadata_options;
+using metadata_options = ::pg_metadata_options;
+using ::PG_METADATA_MTIME;
+using ::PG_METADATA_HEADER;
+using ::pg_file_update_metadata;
 using ::pg_buffer_free;
 using ::pg_file_read_all;
 using ::pg_file_read_all_alloc;

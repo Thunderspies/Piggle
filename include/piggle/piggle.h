@@ -6,4 +6,5 @@
 #include <piggle/io.h>
 #include <piggle/archive_builder.h>
 #include <piggle/change.h>
+#include <piggle/entries.h>
 #endif

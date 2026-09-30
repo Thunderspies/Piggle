@@ -13,7 +13,9 @@ extern "C" {
  * are indexed synchronously; a loose root is not recursively scanned.
  * NULL options -> AUTO/READ. Detect content, not suffix. No implicit
  * creation/recovery. Pending HOGG redo -> RECOVERY_REQUIRED and NULL out.
- * Same-context native alias already open -> BUSY. Owned source on success.
+ * Same-context native alias already open -> BUSY. Writable HOGGs also hold
+ * an exclusive OS lease through final reference release; contention -> BUSY.
+ * Owned source on success.
  * Standalone source control calls serialize; attached controls use tree
  * thread. Relative paths require stable cwd until completion.
  */
@@ -199,7 +201,8 @@ PG_API pg_status PG_CALL pg_source_validate(
 /* Explicit HOGG redo recovery, including after open failed. Requires native
  * write access. Validate profile, replay idempotently, flush/clear journal,
  * rescan and publish an already-open source. Attached source control thread
- * required; same-context active readers/writers -> BUSY. Unknown profile
+ * required; an active staged writer -> BUSY. Idle readers may remain open.
+ * Recovery serializes with read operations. Unknown profile
  * -> UNSUPPORTED, malformed -> CORRUPT, no guessed repair. Result required
  * for the blocking call.
  */

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/stat.h>
 #include <zlib-ng.h>
 #ifdef _WIN32
 #include <direct.h>
@@ -229,17 +230,19 @@ static int writer_stale(uint32_t format, int selected)
 			&writer, &error), PG_OK);
 	}
 	STATUS(pg_writer_write(writer, "bad", 3, &bytes, &error), PG_OK);
-	const char *external_path = format == PG_PIGG2 ? "external" : "target";
+	const char *external_path = "external";
 
-	if (format == PG_PIGG2)
-		CHECK(!archive(external, external_path, format, names, 1));
+	if (format == PG_HOGG10)
+		STATUS(pg_source_open(external, "target", &writable,
+			&other, &error), PG_BUSY);
+	CHECK(!archive(external, external_path, format, names, 1));
 	STATUS(pg_source_open(external, external_path, &writable,
 		&other, &error), PG_OK);
 	STATUS(pg_source_write_all(other, "a", "external", 8, NULL,
 		&error), PG_OK);
 	STATUS(pg_source_close(&other, &error), PG_OK);
 	STATUS(pg_context_close(&external, &error), PG_OK);
-	if (format == PG_PIGG2) {
+	{
 		FILE *input = fopen("external", "rb");
 		FILE *output = fopen("target", "wb");
 		int byte;
@@ -640,7 +643,7 @@ static int datalist(int short_data)
 void pg_test_journal_fault(int mode);
 
 /* EDIT-005 / EDIT-009: publication outcomes and recovery gates. */
-static int journal_fault(int mode)
+static int journal_fault(int mode, int metadata)
 {
 	pg_context *context = NULL;
 	pg_source *source = NULL;
@@ -661,11 +664,27 @@ static int journal_fault(int mode)
 	STATUS(pg_source_open(context, "fault.hogg", &writable,
 		&source, &error), PG_OK);
 	STATUS(pg_source_find(source, "a", &file, &error), PG_OK);
+	if (mode == 1)
+		STATUS(pg_reader_open(file, PG_READ_LOGICAL, &reader,
+			&error), PG_OK);
 	pg_test_journal_fault(mode);
-	STATUS(pg_source_write_all(source, "a", "new", 3, NULL,
-		&error), expected[mode]);
+	if (metadata) {
+		pg_metadata_options edit = { PG_METADATA_MTIME, 123, NULL, 0 };
+
+		STATUS(pg_file_update_metadata(file, &edit, &error),
+			expected[mode]);
+	} else {
+		STATUS(pg_source_write_all(source, "a", "new", 3, NULL,
+			&error), expected[mode]);
+	}
 	CHECK(error.cause == PG_IO && error.native_code == EIO);
 	pg_test_journal_fault(0);
+	if (mode == 1) {
+		STATUS(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+			&error), PG_OK);
+		CHECK(count == 3 && !memcmp(bytes, "old", 3));
+		STATUS(pg_reader_close(&reader, &error), PG_OK);
+	}
 	if (mode > 1) {
 		STATUS(pg_reader_open(file, PG_READ_LOGICAL, &reader,
 			&error), PG_RECOVERY_REQUIRED);
@@ -678,7 +697,8 @@ static int journal_fault(int mode)
 	STATUS(pg_source_rescan(source, &error), PG_OK);
 	STATUS(pg_source_read_all(source, "a", bytes, sizeof(bytes), &count,
 		&error), PG_OK);
-	CHECK(count == 3 && !memcmp(bytes, mode == 1 ? "old" : "new", 3));
+	CHECK(count == 3 && !memcmp(bytes, (mode == 1 ||
+		metadata) ? "old" : "new", 3));
 	STATUS(pg_source_validate(source, &error), PG_OK);
 	STATUS(pg_file_close(&file, &error), PG_OK);
 	STATUS(pg_source_close(&source, &error), PG_OK);
@@ -811,6 +831,8 @@ static int watch_rollback(uint32_t mode)
 	STATUS(pg_tree_attach(tree, source, &error), PG_OK);
 	STATUS(pg_tree_attach(tree, broken, &error), PG_OK);
 	STATUS(pg_tree_request_subtree(tree, NULL, &error), PG_OK);
+	STATUS(pg_tree_manage(tree, NULL, PG_DISCOVER_RECURSIVE, &error),
+		PG_OK);
 	CHECK(!put_file("root/a", "changed"));
 	CHECK(!put_file("broken", "bad"));
 	STATUS(pg_tree_watch(tree, mode, &error), PG_CORRUPT);
@@ -822,6 +844,44 @@ static int watch_rollback(uint32_t mode)
 	STATUS(pg_tree_close(&tree, &error), PG_OK);
 	STATUS(pg_source_close(&source, &error), PG_OK);
 	STATUS(pg_source_close(&broken, &error), PG_OK);
+	STATUS(pg_context_close(&context, &error), PG_OK);
+	return 0;
+}
+
+static int root_rollback(void)
+{
+	pg_context *context = NULL;
+	pg_tree *tree = NULL;
+	pg_file *file = NULL;
+	pg_file_info info;
+	pg_error error;
+	pg_observer observer = { 0 };
+	pg_source_spec sources[] = {
+		{ "root", { PG_LOOSE, PG_READ, 0 } },
+		{ "broken", { PG_PIGG2, PG_READ, 0 } }
+	};
+	const char *names[] = { "b" };
+
+	make_dir("root");
+	CHECK(!put_file("root/a", "old"));
+	STATUS(pg_context_open(&context, &error), PG_OK);
+	CHECK(!archive(context, "broken", PG_PIGG2, names, 1));
+	STATUS(pg_tree_open(context, sources, 2, &tree, &error), PG_OK);
+	STATUS(pg_tree_request_subtree(tree, NULL, &error), PG_OK);
+	STATUS(pg_tree_manage(tree, NULL, PG_DISCOVER_RECURSIVE, &error),
+		PG_OK);
+	STATUS(pg_tree_watch(tree, PG_WATCH_NATIVE, &error), PG_OK);
+	CHECK(!rename("root", "moved"));
+	make_dir("root");
+	CHECK(!put_file("root/a", "replacement"));
+	CHECK(!put_file("broken", "bad"));
+	STATUS(pg_tree_poll(tree, &observer, &error), PG_CORRUPT);
+	STATUS(pg_tree_unwatch(tree, &error), PG_OK);
+	STATUS(pg_tree_find(tree, "a", &file, &error), PG_OK);
+	STATUS(pg_file_inspect(file, &info, &error), PG_OK);
+	CHECK(info.logical_size == 3);
+	STATUS(pg_file_close(&file, &error), PG_OK);
+	STATUS(pg_tree_close(&tree, &error), PG_OK);
 	STATUS(pg_context_close(&context, &error), PG_OK);
 	return 0;
 }
@@ -862,6 +922,62 @@ static int watch_worker(void)
 }
 
 #ifdef _WIN32
+static int set_native_time(const char *path, uint64_t ticks)
+{
+	HANDLE file = CreateFileA(path, FILE_WRITE_ATTRIBUTES,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+		OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	FILETIME time = { (DWORD)ticks, (DWORD)(ticks >> 32) };
+
+	CHECK(file != INVALID_HANDLE_VALUE);
+	CHECK(SetFileTime(file, NULL, NULL, &time));
+	CHECK(CloseHandle(file));
+	return 0;
+}
+
+static int windows_subsecond(void)
+{
+	pg_context *context = NULL;
+	pg_source *source = NULL;
+	pg_file *file = NULL;
+	pg_reader *reader = NULL, *native = NULL;
+	pg_file_info before, after;
+	pg_error error;
+	char bytes[3];
+	size_t count;
+	uint64_t ticks = 133000000000000000ULL;
+
+	make_dir("root");
+	CHECK(!put_file("root/a", "old"));
+	CHECK(!set_native_time("root/a", ticks + 1000000));
+	STATUS(pg_context_open(&context, &error), PG_OK);
+	STATUS(pg_source_open(context, "root", NULL, &source, &error), PG_OK);
+	STATUS(pg_source_request_subtree(source, NULL, &error), PG_OK);
+	STATUS(pg_source_find(source, "a", &file, &error), PG_OK);
+	STATUS(pg_file_inspect(file, &before, &error), PG_OK);
+	STATUS(pg_reader_open(file, PG_READ_LOGICAL, &reader, &error), PG_OK);
+	STATUS(pg_reader_open_native(context, "root/a", &native, &error),
+		PG_OK);
+	STATUS(pg_file_close(&file, &error), PG_OK);
+	CHECK(!put_file("root/a", "new"));
+	CHECK(!set_native_time("root/a", ticks + 2000000));
+	STATUS(pg_reader_read(reader, bytes, sizeof(bytes), &count, &error),
+		PG_STALE);
+	CHECK(!count);
+	STATUS(pg_reader_seek(native, 0, &error), PG_STALE);
+	STATUS(pg_source_rescan(source, &error), PG_OK);
+	STATUS(pg_source_find(source, "a", &file, &error), PG_OK);
+	STATUS(pg_file_inspect(file, &after, &error), PG_OK);
+	CHECK(before.mtime == after.mtime);
+	CHECK(before.copy_generation != after.copy_generation);
+	STATUS(pg_file_close(&file, &error), PG_OK);
+	STATUS(pg_reader_close(&reader, &error), PG_OK);
+	STATUS(pg_reader_close(&native, &error), PG_OK);
+	STATUS(pg_source_close(&source, &error), PG_OK);
+	STATUS(pg_context_close(&context, &error), PG_OK);
+	return 0;
+}
+
 /* NAME-005: native UTF-8 paths are independent of the ANSI code page. */
 static int windows_native(int cli)
 {
@@ -1099,9 +1215,72 @@ static int posix_basename(void)
 }
 #endif
 
+/* EDIT-011: rejection must not invalidate an unrelated reader. */
+static int hogg_busy(void)
+{
+	pg_context *context = NULL;
+	pg_source *source = NULL, *second = NULL;
+	pg_context *other = NULL;
+	pg_reader *reader = NULL;
+	pg_file *file = NULL;
+	pg_source_options options = { PG_HOGG10, PG_WRITE };
+	const char *names[] = { "a" };
+	struct stat before, after;
+	unsigned char bytes[32];
+	size_t count;
+	pg_error error;
+
+	STATUS(pg_context_open(&context, &error), PG_OK);
+	CHECK(!archive(context, "busy.hogg", PG_HOGG10, names, 1));
+	STATUS(pg_source_open(context, "busy.hogg", &options, &source,
+		&error), PG_OK);
+	STATUS(pg_reader_open_source(source, "a", PG_READ_LOGICAL,
+		&reader, &error), PG_OK);
+	STATUS(pg_source_find(source, "a", &file, &error), PG_OK);
+	CHECK(!stat("busy.hogg", &before));
+	STATUS(pg_context_open(&other, &error), PG_OK);
+	STATUS(pg_source_open(other, "busy.hogg", &options, &second,
+		&error), PG_BUSY);
+	CHECK(!stat("busy.hogg", &after));
+	CHECK(before.st_size == after.st_size);
+	STATUS(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+		&error), PG_OK);
+	CHECK(count == 3);
+	CHECK(!memcmp(bytes, "old", count));
+	for (unsigned i = 0; i < 40; i++) {
+		char name[32];
+
+		snprintf(name, sizeof(name), "new%u", i);
+		STATUS(pg_source_write_all(source, name, "new", 3, NULL,
+			&error), PG_OK);
+		STATUS(pg_reader_seek(reader, 0, &error), PG_OK);
+		STATUS(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+			&error), PG_OK);
+		CHECK(count == 3 && !memcmp(bytes, "old", 3));
+	}
+	STATUS(pg_file_verify(file, &error), PG_OK);
+	STATUS(pg_file_write_all(file, "replacement", 11,
+		NULL, &error), PG_OK);
+	STATUS(pg_reader_seek(reader, 0, &error), PG_STALE);
+	STATUS(pg_reader_close(&reader, &error), PG_OK);
+	STATUS(pg_file_close(&file, &error), PG_OK);
+	STATUS(pg_source_write_all(source, "b", "new", 3, NULL, &error),
+		PG_OK);
+	STATUS(pg_source_validate(source, &error), PG_OK);
+	STATUS(pg_source_close(&source, &error), PG_OK);
+	STATUS(pg_source_open(other, "busy.hogg", &options, &second,
+		&error), PG_OK);
+	STATUS(pg_source_close(&second, &error), PG_OK);
+	STATUS(pg_context_close(&other, &error), PG_OK);
+	STATUS(pg_context_close(&context, &error), PG_OK);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	CHECK(argc == 2);
+	if (!strcmp(argv[1], "hogg_busy"))
+		return hogg_busy();
 	if (!strcmp(argv[1], "retained_unpack"))
 		return retained_unpack();
 #ifndef _WIN32
@@ -1115,6 +1294,8 @@ int main(int argc, char **argv)
 	if (!strcmp(argv[1], "loose_writer_ancestor"))
 		return loose_writer_ancestor();
 #ifdef _WIN32
+	if (!strcmp(argv[1], "windows_subsecond"))
+		return windows_subsecond();
 	if (!strcmp(argv[1], "windows_native"))
 		return windows_native(0);
 	if (!strcmp(argv[1], "windows_cli"))
@@ -1132,6 +1313,8 @@ int main(int argc, char **argv)
 		return watch_rollback(PG_WATCH_SCAN);
 	if (!strcmp(argv[1], "native_rollback"))
 		return watch_rollback(PG_WATCH_NATIVE);
+	if (!strcmp(argv[1], "root_rollback"))
+		return root_rollback();
 	if (!strcmp(argv[1], "watch_repair"))
 		return watch_repair();
 	if (!strcmp(argv[1], "watch_worker"))
@@ -1142,7 +1325,9 @@ int main(int argc, char **argv)
 		return datalist(0);
 #ifdef __linux__
 	if (!strncmp(argv[1], "journal_", 8))
-		return journal_fault(atoi(argv[1] + 8));
+		return journal_fault(atoi(argv[1] + 8), 0);
+	if (!strncmp(argv[1], "metadata_fault_", 15))
+		return journal_fault(atoi(argv[1] + 15), 1);
 #endif
 	if (!strcmp(argv[1], "normalized"))
 		return loose_resolution(1);

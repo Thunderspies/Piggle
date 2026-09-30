@@ -86,8 +86,8 @@ Feature: Whole-file sequential transfer and publication
 
   @IO-011
   Scenario: Whole-file transfers expose no random modification mode
-    Given an open sequential transfer
-    Then the public interface provides no seek, positional I/O, or append
+    Given an open sequential writer
+    Then the writer provides no seek, positional I/O, or append
     And a write always describes a complete replacement
 
   @IO-012
@@ -141,3 +141,42 @@ Feature: Whole-file sequential transfer and publication
     When I try to stage another entry named "dir/a"
     Then the second entry returns an exists error
     And the first staged entry remains available for builder finish
+
+  @IO-018
+  Scenario: Readers seek within a selected representation
+    Given independent readers of native, PIGG and HOGG files
+    When I seek forward and backward within each represented size
+    Then tell reports the requested offset and reads return its exact bytes
+    And seeking one reader does not move another reader
+    And an out-of-range seek fails without moving the reader
+
+  @IO-019
+  Scenario: Seeking preserves identity and verification
+    Given an archive reader with a bad stored checksum
+    When I seek to EOF and perform a positive-capacity read
+    Then the read reports the checksum error
+    And seeking does not make a stale physical selection valid again
+
+  @IO-020
+  Scenario: Repeated compressed seeks survive checkpoint eviction
+    Given a compressed logical reader spanning more than 64 MiB
+    When I alternate backward and forward seeks across checkpoint boundaries
+    Then every returned byte matches the selected logical content
+    And the reader retains at most 64 private decoder checkpoints
+
+  @IO-026
+  Scenario: MissionServer checksums describe stored bytes
+    Given a HOGG uses the explicit stored checksum profile
+    When I read logical or stored bytes through verified EOF
+    Then its stored checksum and logical encoding are verified
+    And copying to a logical profile recomputes the destination digest
+    And opening with the wrong profile never accepts the alternate digest
+
+  @IO-027
+  Scenario: Native identity retains Windows subsecond timestamps
+    Given a reader has captured a file on Windows
+    When its bytes change without changing size or whole-second mtime
+    And its native subsecond modification time changes
+    Then the reader reports stale
+    And a source rescan advances the copy generation
+    And public timestamps remain whole Unix seconds

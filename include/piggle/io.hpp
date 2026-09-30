@@ -13,6 +13,8 @@ using ::pg_reader_open_tree;
 using ::pg_reader_open;
 using ::pg_reader_open_native;
 using ::pg_reader_inspect;
+using ::pg_reader_seek;
+using ::pg_reader_tell;
 using ::pg_reader_read;
 using ::pg_reader_close;
 using ::pg_writer_open_source;

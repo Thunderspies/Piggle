@@ -243,7 +243,8 @@ static int run(int argc, char **argv)
 	if (!strcmp(argv[1], "create")) {
 		status = create_archive(context, argc, argv, &error);
 	} else {
-		pg_source_options options = { PG_AUTO, PG_READ };
+		pg_source_options options = { PG_AUTO, PG_READ,
+			PG_CHECKSUM_LOGICAL };
 		if (!strcmp(argv[1], "replace"))
 			options.access = PG_WRITE;
 		status = pg_source_open(context, argv[2], &options,

@@ -59,3 +59,21 @@ ctest --test-dir /tmp/piggle-shared --output-on-failure
 
 For a multi-configuration generator, pass the same configuration to the build
 and test commands, for example `--config Release`.
+
+## New discovery and archive contracts
+
+The entry, managed-scope, seek, checksum, metadata and lease cases cover the
+0.2 contracts. Linux regression cases inject journal failures before and
+after commitment, including metadata-only updates. The lease test launches
+another process and checks hard-link aliases, native replacement, builder
+replacement and ownership retained by a reader.
+
+Native Windows tests should also run on a real Windows filesystem. Wine can
+miss recursive notices for existing subdirectories and can fail to preserve
+hidden/system attributes. The deep managed-scope and attribute tests remain
+enabled; a Wine-only pass cannot establish those Windows guarantees.
+
+Address/undefined-behavior sanitizer runs can exclude `api_memory_*` when the
+sanitizer shadow mapping conflicts with those tests' address-space limits.
+Run those memory-limit cases separately in an ordinary build. Do not treat
+that separate run as a sanitizer result.

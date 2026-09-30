@@ -7,4 +7,5 @@
 #include <piggle/io.hpp>
 #include <piggle/archive_builder.hpp>
 #include <piggle/change.hpp>
+#include <piggle/entries.hpp>
 #endif

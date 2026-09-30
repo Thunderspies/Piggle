@@ -8,7 +8,7 @@ quickstart and the [design rationale](design.md) for background.
 
 Piggle manages named whole files in loose directories, PIGG v2 and HOGG v10
 archives. A source represents storage; a tree resolves ordered sources; a
-file selects one physical copy. Readers have independent sequential positions.
+file selects one physical copy. Readers have independent seekable positions.
 Writers stage complete replacements. An archive builder stages several entries
 and publishes one new archive. Callers schedule transfers by choosing each reader and writer chunk size.
 
@@ -18,7 +18,7 @@ the same `pg_*` functions into `piggle` and offer shorter type aliases; they
 add no classes, overloads, templates, ownership conversions or ABI. Include
 `piggle/piggle.h` or `piggle/piggle.hpp` for the complete surface.
 
-No seek, append, partial in-place file editing, revision history, asset
+No writer seek, append, partial payload editing, revision history, asset
 interpretation, game-directory discovery or cross-source transaction is
 promised. Reading exact stored bytes is supported, with validation. Archive
 construction is a transaction on one native destination; editing an existing
@@ -34,10 +34,12 @@ and format plugins are outside this API.
 | Find one file | `pg_source_find` / `pg_tree_find` | Indexed inside a requested subtree; exact loose probe outside it |
 | Cache a subtree | `pg_source_request_subtree` / `pg_tree_request_subtree` | Recursive loose scan; repeat to refresh |
 | List visible files | `pg_source_files` / `pg_tree_files` | Captured cursor from a requested index |
+| List files and directories | `pg_source_entries` / `pg_tree_entries` | Immediate children or recursive entry snapshots |
 | Read a named file | Source/tree `read_all` or `read_all_alloc` | Select once, verify, close |
 | Stream a named file | `pg_reader_open_source` / `pg_reader_open_tree` | Independent reader position |
+| Reposition a reader | `pg_reader_seek` / `pg_reader_tell` | Absolute offsets in the selected representation |
 | Refresh known paths | Source/tree `rescan` | Indexed archives and requested loose scopes only |
-| Observe changes | `pg_tree_watch`, then `pg_tree_poll` | Open tree readers and tree-requested subtrees define watched scopes |
+| Observe changes | `pg_tree_manage`, `pg_tree_watch`, `pg_tree_poll` | Managed scopes, discovery and open tree readers define coverage |
 | Write or export content | Source/file writer or export helpers | Caller-sized chunks or blocking helpers |
 | Pack or unpack | Source/tree helpers or reader/writer composition | One archive publication or per-file unpack publication |
 | Release a reference | `pg_*_close(&handle, error)` | Synchronous cleanup |
@@ -144,9 +146,28 @@ close returns BUSY while its staged writers remain live.
 
 ## Caller-controlled streaming
 
-Readers and writers transfer sequentially. The caller chooses each read
-capacity and write size. A reader reports exact bytes, verifies available
-logical hashes at EOF, and may be closed early without a verification claim.
+Writers transfer sequentially; readers also support absolute seeks. The
+caller chooses each read capacity and write size. A reader reports exact bytes,
+verifies available profile-selected hashes at EOF, and may be closed early
+without a verification claim.
+Reader seek accepts an absolute offset from zero through the represented size;
+tell reports that offset without I/O. Invalid offsets leave position intact.
+Seeking retains the selected physical copy and checks its native identity;
+stale or operational failures make the reader close-only. Seeking alone makes
+no verification claim, including at EOF. The next positive-capacity read at
+EOF verifies the complete archive payload before returning END, even when
+earlier bytes were skipped. Backward seek permits reading after EOF.
+
+Native, uncompressed and stored-representation readers reposition directly.
+Compressed logical readers start retaining decompressor checkpoints when seek
+is first used. Checkpoints are spaced at 1 MiB boundaries, with up to 64 retained
+per reader and least-recently-used eviction. A seek restores the nearest
+preceding checkpoint and decodes the remainder; the initial state remains
+available without a checkpoint. Cache allocation is optional: inability to
+retain a checkpoint falls back to decoding without changing the public result.
+Independent reader caches are released on close. Writer positions remain
+sequential and cannot be changed.
+
 A writer requires declared input and logical lengths. `pg_writer_finish`
 checks lengths, codec and digest, then publishes or privately stages its result.
 Closing before finish aborts unpublished content. A failed accepted write or
@@ -210,6 +231,24 @@ in unsigned-byte canonical lexical order. It does not force a subtree scan or
 register a new watched prefix; NATIVE hints may be reconciled first. An exact
 visible file -> CONFLICT; a missing directory -> empty cursor. The cursor
 owns its captured selections and remains stable when the index changes.
+
+Entry cursors follow the same coverage and snapshot rules. Zero enumeration
+flags selects immediate children; `PG_ENTRIES_RECURSIVE` selects all descendants.
+They include explicit loose directories, including empty ones, and implied
+directories from archive paths. The requested root is excluded. Each next call
+returns `pg_entry_info` and, for a file, transfers an owned `pg_file`. Directory
+entries return no file handle. Entry names borrow the entry cursor until close;
+file handles have independent ownership. Closing the entry cursor releases
+unconsumed selections and metadata without modifying sources.
+
+Entries use canonical lexical order. Directory metadata follows source order;
+within one source an explicit directory takes precedence over an implied one.
+Implied directories have zero size and timestamp and canonical original names.
+Captured attributes expose read-only, hidden, system and implied flags. Hidden
+uses Windows attributes or a dot-prefixed basename on Unix; system applies only
+on Windows. File-only cursors and archive pack/unpack continue to omit directory
+records. Requested empty directories participate in rescan and native-watch
+reconciliation and are reported through entry metadata in the visible feed.
 
 Exact source lookup uses the indexed result, including indexed absence, inside
 a source-requested loose subtree. Tree lookup uses the overlay index inside a
@@ -292,8 +331,8 @@ with per-handle serialization, just like an explicitly selected reader.
 `pg_reader_open(file, representation, ...)` fixes one physical copy and starts
 at zero. Logical mode decodes; stored mode returns the exact stored payload,
 with reader metadata describing its encoding and exposed length. Stored EOF
-still validates decoding, logical length and available logical digest. There
-is no unchecked extraction mode. An independent reader does not move another
+still validates decoding, logical length and the available profile-selected
+digest. There is no unchecked extraction mode. An independent reader does not move another
 reader. Native readers capture one regular file's identity, size and timestamp.
 
 Positive reads return up to capacity. The final nonempty read validates before
@@ -351,7 +390,8 @@ recheck at commitment; observed intervening edits are STALE/RETRY. Reject output
 aliases into retained source data, including contained paths of loose sources.
 Create missing parents through anchored native traversal; reject substituted
 ancestors or links. Created directories may remain after abort. Cross-context
-or external changes are detected when observable, not globally locked out.
+or external changes are detected when observable. Writable HOGG sources
+also enforce an exclusive OS lease across cooperating contexts/processes.
 
 Import/copy rejects an input that aliases its own replacement target. Native
 path spelling and native input timestamps are preserved. Explicit copying from
@@ -517,12 +557,16 @@ only while its originating tree is live. Tree close stops monitoring but
 never invalidates a retained reader's content reference. A failed native
 watch setup fails the call that would add the scope, without publishing its
 output or a partial cache. A reader close stops its watch after the close is
-accepted; events already queued remain pending. No `find`, cursor advancement,
-standalone-source reader, or unrequested path starts a watch.
+accepted; events already queued remain pending. Inside managed coverage, `find`
+retains a baseline, including known absence.
+Outside it, `find`, cursor advancement and standalone-source readers do not
+add watched scopes. Management is independent of discovery completeness.
 
-NATIVE tracks relevant loose parent directories and archive paths and
-reconciles a finite cut of pending hints. SCAN polls only active exact names
-and requested tree prefixes. Synchronous tree lookup and listing also process
+NATIVE tracks loose directories and archive paths and retains hint names.
+An exact lookup reconciles hints affecting that name; poll reconciles the
+remaining cut. Directory watch setup does not index files. SCAN eagerly
+discovers managed scopes and polls them along with requested scopes and
+active exact names. Synchronous tree lookup and listing also process
 pending native hints for requested tree scopes before answering, but never
 call observers. Without watching, exact lookup probes an unrequested loose
 path again; a requested path is answered from its index. Subtree requests
@@ -540,22 +584,29 @@ Archive content follows its indexed view unless the caller rescans it.
 
 `pg_tree_poll` processes one finite observation cut and delivers visible
 reports synchronously on the tree control thread. The observer has one
-optional callback; NULL discards delivered reports. ADD has NULL before,
-REMOVE has NULL after, and UPDATE has both, including a changed winner with
-equal content. A hidden-only edit produces no visible report. Events are
+optional callback; NULL discards delivered reports. `before_entry` and
+`after_entry` describe file or directory sides; `before` and `after` expose
+additional metadata only for file sides. ADD has no before side, REMOVE no
+after side, and UPDATE includes both, including a changed winner with equal
+content. A known hidden-only edit produces no visible transition. Unknown
+managed history produces INVALIDATE without claiming a transition. Events are
 limited to watched names and prefixes. They may coalesce external intermediate
-edits; no revision history is promised. Attachment, detachment and library
-mutations queue changes only where they affect watched visible names.
+edits; no revision history is promised. Attachment and detachment invalidate
+managed scopes and compare known visible names. Library mutations queue changes for known watched names.
 Publication precedes callbacks, so callback lookup sees the latest reconciled
 state. Reports queued before a reader closes remain deliverable. Unwatch or
 tree close discards undelivered reports.
 
 Native notification loss queues `PG_CHANGE_LOSS` with a known watched scope
 when available, or NULL scope when provenance is unknown. LOSS invalidates
-application assumptions; it is not a removal. Poll reconciles affected
-tracked scopes against their last observations before considering loss
-repaired. A failed reconciliation retains queued reports and prior cached
-state. No ordinary report allocation is required merely to remember loss.
+application assumptions; it is not a removal. Poll invalidates managed scopes
+and refreshes discovered coverage and exact observations before considering
+loss repaired. It does not index unknown managed descendants. A missing loose root remains managed; when it reappears,
+Piggle rebinds it, invalidates the scope and restores native monitoring.
+Retained selections keep their captured identity and become stale when the
+corresponding native path changes. A failed reconciliation retains queued
+reports and prior cached state. No ordinary report allocation is required
+merely to remember loss.
 Callbacks already delivered are never replayed. Callback names and metadata
 borrow until return; copy them before retaining or scheduling work.
 
@@ -575,3 +626,84 @@ indexing, and blocking helpers may still block within one call.
 
 See [testing](testing.md) for test commands. The [PIGG v2](pigg-v2-format.md) and
 [HOGG v10](hogg-v10-format.md) specifications define the on-disk formats.
+
+## Checksum profiles
+
+Source options select LOGICAL (zero/default) or STORED checksums. STORED is
+supported for HOGG user records only. The four wire bytes have no domain tag;
+opening with the wrong profile produces CHECKSUM when verification fails.
+Internal DataList records always retain their logical checksum convention.
+Both reader representations verify exact encoding and decoded length as well
+as the selected digest. There is no accept-either fallback.
+
+`pg_archive_builder_create_options` accepts an explicit archive profile;
+`pg_archive_builder_create` retains logical defaults. Pack options select the
+destination profile. Captured file/source metadata includes the domain.
+Expected-digest options independently select logical bytes or final stored
+output bytes. Copy and export verify the source profile before publication
+and compute the destination profile; a stored input hash is never reused as
+a logical expectation. Per-entry source profiles are not supported.
+
+## Shallow discovery
+
+`pg_source_discover` and `pg_tree_discover` accept CHILDREN or RECURSIVE.
+CHILDREN enumerates one directory without opening its child directories;
+applications prune or stop by deciding which children to discover next.
+The existing request_subtree calls select RECURSIVE. Directory-capable entry
+cursors accept shallow coverage for immediate listings, while recursive
+listings require recursive coverage. Discovery and enumeration remain separate:
+a snapshot never silently scans an incompletely discovered subtree.
+
+## HOGG write ownership and readers
+
+A writable HOGG source holds an exclusive OS lease until its last retained
+reference closes. Competing writable opens, recovery or native replacement
+through Piggle return BUSY. Read-only opens remain possible; independent
+contexts retain external-change detection rather than sharing cached indexes.
+The lease coordinates Piggle users, not legacy Cryptic mutex protocols.
+
+HOGG reads, seeks, verification, recovery and publication serialize for the
+duration of each operation. An idle reader does not exclude writes. Known internal
+mutations preserve unchanged copies, including their relocation during table
+growth. Changed or deleted selected entries return STALE on subsequent content
+access, including metadata-only changes. Retained metadata never changes.
+External changes remain conservatively stale. PIGG reader exclusion is unchanged.
+
+## Metadata-only mutation
+
+`pg_file_update_metadata` updates a captured writable copy. MTIME and HEADER
+flags select the fields; other fields, original spelling, payload encoding,
+lengths and checksum remain unchanged. An empty selected header clears it.
+No-op values do not advance generations. HOGG timestamp edits use UPDATE without
+payload growth; header edits retain the payload range through DataList/journal
+publication. PIGG edits clone encoded ranges without recompression. Loose files
+support MTIME and reject HEADER. Old selections remain inspectable but become
+stale for content after a change. Ordinary publication outcome rules apply.
+
+## Managed scopes and unknown state
+
+`pg_tree_manage(tree, prefix, depth, error)` registers observation coverage
+without claiming discovery completeness. Use one tree per physical source
+when the application owns winner selection. In native mode, unknown names
+produce `PG_CHANGE_INVALIDATE` in the existing visible feed, with no invented
+before/after state. Lookups (including known absence) and explicit discovery
+establish baselines; subsequent visible transitions use ADD/UPDATE/REMOVE.
+Directory transitions expose `before_entry` and `after_entry`; the original
+file metadata pointers are populated only for file sides.
+
+Linux watch setup visits directories but does not index files. Windows uses
+recursive native monitoring. Ordinary hints retain their relative paths and
+refresh affected known names/subtrees. SCAN management establishes an eager
+baseline and refreshes it at poll. Native loss invalidates managed scopes;
+only previously discovered scopes are rescanned. Applications choose when to
+discover unknown subtrees. Directory rename invalidates unknown descendants.
+
+Registrations form a union and persist through unwatch. Unmanage removes only
+the matching prefix/depth registration, preserving discovery, queued reports,
+and independent reader watches. Detaching a source removes its native watches.
+Lookup/list operations queue reports, never invoke observers. Reports queued
+inside an observer wait for a later poll.
+
+The 0.2 API extends plain option, inspection and change structs. Rebuild
+clients against matching headers and library; mixing 0.1 structs with a 0.2
+binary is unsupported. Existing archive wire formats are unchanged.

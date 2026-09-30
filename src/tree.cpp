@@ -290,8 +290,9 @@ PG_API pg_status PG_CALL pg_tree_attach(
 		for (scope = tree->scopes; scope; scope = scope->next) {
 			if (scope->exact)
 				continue;
-			status = pg_source_request_subtree(source,
-				scope->prefix, error);
+			status = pg_source_discover_tree(source, scope->prefix,
+				scope->shallow ? PG_DISCOVER_CHILDREN :
+				PG_DISCOVER_RECURSIVE, error);
 			if (status != PG_OK) {
 				pg_source_release(source, &native_code);
 				return status;
@@ -302,6 +303,7 @@ PG_API pg_status PG_CALL pg_tree_attach(
 		status = pg_tree_native_add_source(tree, source,
 			&native_code);
 		if (status != PG_OK) {
+			pg_tree_native_remove_source(tree, source);
 			pg_source_release(source, &native_code);
 			return pg_native_result(status, native_code,
 				error);
@@ -309,7 +311,7 @@ PG_API pg_status PG_CALL pg_tree_attach(
 	}
 	tree->sources[tree->count++] = source;
 	source->attached = tree;
-	status = pg_tree_queue_changes(tree, error);
+	status = pg_tree_queue_topology(tree, error);
 	if (status != PG_OK) {
 		tree->count--;
 		source->attached = NULL;
@@ -347,7 +349,7 @@ PG_API pg_status PG_CALL pg_tree_detach(
 	memmove(tree->sources + i, tree->sources + i + 1,
 		(tree->count - i - 1) * sizeof(*tree->sources));
 	tree->count--;
-	status = pg_tree_queue_changes(tree, error);
+	status = pg_tree_queue_topology(tree, error);
 	if (status != PG_OK) {
 		memmove(tree->sources + i + 1,
 			tree->sources + i,
@@ -487,15 +489,19 @@ PG_API pg_status PG_CALL pg_tree_pack(
 		const pg_pack_options *options,
 		pg_error *error)
 {
-	pg_pack_options defaults = { PG_COMPRESS_AUTO, 0 };
+	pg_pack_options defaults = { PG_COMPRESS_AUTO, 0, PG_CHECKSUM_LOGICAL };
 	const pg_pack_options *chosen = options ? options : &defaults;
 	pg_cursor *cursor = NULL;
 
 	if (!tree || !native_archive || !*native_archive ||
 	    (format != PG_PIGG2 && format != PG_HOGG10) ||
 	    chosen->compression > PG_COMPRESS_FORCE ||
+	    chosen->checksum_domain > PG_CHECKSUM_STORED ||
 	    (chosen->flags & ~PG_OVERWRITE))
 		return pg_result(PG_INVALID, error);
+	if (chosen->checksum_domain == PG_CHECKSUM_STORED &&
+	    format != PG_HOGG10)
+		return pg_result(PG_UNSUPPORTED, error);
 	pg_status status = pg_tree_request_subtree(tree, NULL, error);
 
 	if (status != PG_OK)
@@ -565,14 +571,18 @@ static pg_status pg_tree_find_canonical(
 	status = pg_tree_control_status(tree, 0);
 	if (status != PG_OK)
 		return pg_result(status, error);
+	tree->query_name = name;
 	status = pg_tree_native_reconcile(tree, error);
+	tree->query_name = NULL;
 	if (status != PG_OK)
 		return status;
 	for (i = tree->count; i; i--) {
 		pg_file *candidate = NULL;
 		pg_error find_error;
 
-		status = pg_tree_scope_covers(tree, name) ?
+		status = (tree->reconciling ||
+			pg_tree_scope_covers(tree, name) ||
+			pg_tree_manages(tree, name)) ?
 			pg_source_find(tree->sources[i - 1], name,
 				&candidate, &find_error) :
 			pg_source_find_fresh(tree->sources[i - 1], name,
@@ -628,6 +638,17 @@ PG_API pg_status PG_CALL pg_tree_find(pg_tree *tree, const char *name,
 		required, &required, error);
 	if (status == PG_OK)
 		status = pg_tree_find_canonical(tree, canonical, out, error);
+	if ((status == PG_OK || status == PG_NOT_FOUND ||
+	     status == PG_CONFLICT) && !tree->reconciling &&
+	    pg_tree_manages(tree, canonical)) {
+		pg_status observed = pg_tree_observe_name(tree, canonical,
+			NULL);
+
+		if (observed != PG_OK) {
+			pg_file_close(out, NULL);
+			status = pg_result(observed, error);
+		}
+	}
 	free(canonical);
 	return status;
 }
@@ -639,7 +660,7 @@ static int pg_tree_scope_covers(pg_tree *tree, const char *name)
 	for (scope = tree->scopes; scope; scope = scope->next) {
 		size_t length;
 
-		if (scope->exact)
+		if (scope->exact || scope->shallow)
 			continue;
 		if (!scope->prefix)
 			return 1;
@@ -706,6 +727,7 @@ pg_status pg_tree_cursor_clone(pg_cursor *source,
 			goto fail_clone;
 		}
 		file->source = from->source;
+		file->attributes = from->attributes;
 		file->origin_tree = from->origin_tree;
 		file->source_identity = from->source_identity;
 		file->payload_offset = from->payload_offset;
@@ -747,7 +769,26 @@ static pg_status pg_tree_exact_snapshot(pg_tree *tree,
 	if (!cursor)
 		return pg_result(PG_NOMEM, error);
 	cursor->context = tree->context;
+	int reconciling = tree->reconciling;
+
+	tree->reconciling = 1;
 	status = pg_tree_find(tree, name, &file, error);
+	tree->reconciling = reconciling;
+	if (status == PG_CONFLICT) {
+		for (size_t i = tree->count; i && !file; i--) {
+			pg_source *source = tree->sources[i - 1];
+
+			for (pg_source_record *r = source->records; r; r =
+				r->next) {
+				if (S_ISDIR(r->identity.st_mode) &&
+				    !strcmp(r->info.canonical_name, name)) {
+					status = pg_source_select(source, r,
+						&file, error);
+					break;
+				}
+			}
+		}
+	}
 	if (status == PG_NOT_FOUND || status == PG_CONFLICT)
 		status = PG_OK;
 	if (status != PG_OK) {
@@ -784,7 +825,7 @@ pg_status pg_tree_reader_scope_add(pg_tree *tree, pg_file *file,
 		return pg_result(PG_OK, error);
 	}
 	for (scope = tree->scopes; scope; scope = scope->next) {
-		if (scope->exact && scope->reader_refs &&
+		if (scope->exact && (scope->reader_refs || scope->managed) &&
 		    strcmp(scope->prefix, name) == 0) {
 			if (scope->reader_refs == SIZE_MAX) {
 				pg_tree_scope_unlock(tree);
@@ -833,7 +874,7 @@ void pg_tree_reader_scope_remove(pg_tree *tree, pg_tree_scope *scope)
 		pg_tree_scope_unlock(tree);
 		return;
 	}
-	if (--scope->reader_refs) {
+	if (--scope->reader_refs || scope->managed) {
 		pg_tree_scope_unlock(tree);
 		return;
 	}
@@ -862,7 +903,7 @@ void pg_tree_reader_scope_sweep(pg_tree *tree)
 	while (*at) {
 		pg_tree_scope *scope = *at;
 
-		if (!scope->exact || scope->reader_refs) {
+		if (!scope->exact || scope->reader_refs || scope->managed) {
 			at = &scope->next;
 			continue;
 		}
@@ -880,7 +921,29 @@ pg_status pg_tree_scope_snapshot(pg_tree *tree,
 {
 	return scope->exact ?
 		pg_tree_exact_snapshot(tree, scope->prefix, out, error) :
-		pg_tree_files(tree, scope->prefix, out, error);
+		pg_tree_entry_snapshot(tree, scope, out, error);
+}
+
+static int pg_tree_scope_covers_depth(pg_tree *tree, const char *prefix,
+		int recursive)
+{
+	if (pg_tree_scope_covers(tree, prefix))
+		return 1;
+	if (!recursive) {
+		for (pg_tree_scope *s = tree->scopes; s; s = s->next) {
+			if (!s->exact && s->shallow &&
+			    !strcmp(s->prefix ? s->prefix : "",
+				prefix ? prefix : ""))
+				return 1;
+		}
+	}
+	return 0;
+}
+
+PG_API pg_status PG_CALL pg_tree_files(pg_tree *tree, const char *prefix,
+		pg_cursor **out, pg_error *error)
+{
+	return pg_tree_files_depth(tree, prefix, 1, out, error);
 }
 
 static int pg_tree_file_compare(const void *left, const void *right)
@@ -929,11 +992,13 @@ static pg_status pg_tree_prefix_check(pg_tree *tree, const char *prefix)
 }
 
 /* Merge captured source selections without per-file lookups. */
-PG_API pg_status PG_CALL pg_tree_files(pg_tree *tree,
-		const char *prefix, pg_cursor **out, pg_error *error)
+pg_status pg_tree_files_depth(pg_tree *tree, const char *prefix,
+		int recursive, pg_cursor **out, pg_error *error)
 {
 	pg_cursor *merged;
 	pg_file **visible = NULL;
+	const char **directories = NULL;
+	size_t directory_count = 0;
 	char *canonical = NULL;
 	pg_status status;
 	size_t required = 0, capacity = 0, i, j, kept = 0;
@@ -962,7 +1027,7 @@ PG_API pg_status PG_CALL pg_tree_files(pg_tree *tree,
 		if (status != PG_OK)
 			goto fail_early;
 	}
-	if (!pg_tree_scope_covers(tree, canonical)) {
+	if (!pg_tree_scope_covers_depth(tree, canonical, recursive)) {
 		for (i = 0; i < tree->count; i++) {
 			if (tree->sources[i]->format == PG_LOOSE) {
 				status = PG_INVALID;
@@ -971,6 +1036,10 @@ PG_API pg_status PG_CALL pg_tree_files(pg_tree *tree,
 		}
 	}
 	status = pg_tree_prefix_check(tree, canonical);
+	if (status != PG_OK)
+		goto fail_early;
+	status = pg_indexed_directories(tree->sources, tree->count,
+		&directories, &directory_count);
 	if (status != PG_OK)
 		goto fail_early;
 	merged = (pg_cursor *)calloc(1, sizeof(*merged));
@@ -984,7 +1053,8 @@ PG_API pg_status PG_CALL pg_tree_files(pg_tree *tree,
 		pg_cursor *source_cursor = NULL;
 		pg_error work_error;
 
-		status = pg_source_files(tree->sources[i], canonical,
+		status = pg_source_files_depth(tree->sources[i], canonical,
+			recursive,
 			&source_cursor, &work_error);
 		if (status == PG_CONFLICT)
 			continue;
@@ -1064,7 +1134,9 @@ PG_API pg_status PG_CALL pg_tree_files(pg_tree *tree,
 				pg_file_close(&merged->files[j], NULL);
 		}
 		name = winner->info.canonical_name;
-		if (pg_tree_items_directory(merged->files + next,
+		if (pg_directory_names_contain(directories, directory_count,
+			name) ||
+		    pg_tree_items_directory(merged->files + next,
 			merged->count - next, name)) {
 			for (j = i; j < next; j++) {
 				if (merged->files[j] == winner)
@@ -1088,6 +1160,7 @@ PG_API pg_status PG_CALL pg_tree_files(pg_tree *tree,
 	visible = NULL;
 	merged->count = kept;
 	free(canonical);
+	free(directories);
 	*out = merged;
 	return pg_result(PG_OK, error);
 
@@ -1098,12 +1171,13 @@ fail_files:
 	pg_cursor_close(&merged, NULL);
 fail_early:
 	free(canonical);
+	free(directories);
 	return pg_result(status, error);
 }
 
 /* Refresh and retain a subtree as an explicit tree watch scope. */
-PG_API pg_status PG_CALL pg_tree_request_subtree(pg_tree *tree,
-		const char *prefix, pg_error *error)
+pg_status pg_tree_discover(pg_tree *tree, const char *prefix,
+		uint32_t depth, pg_error *error)
 {
 	pg_tree_scope *scope = NULL;
 	pg_tree_source_state *saved = NULL;
@@ -1114,7 +1188,7 @@ PG_API pg_status PG_CALL pg_tree_request_subtree(pg_tree *tree,
 	int reconciling;
 	int created = 0;
 
-	if (!tree)
+	if (!tree || depth > PG_DISCOVER_RECURSIVE)
 		return pg_result(PG_INVALID, error);
 	status = pg_tree_control_status(tree, 1);
 	if (status != PG_OK)
@@ -1136,8 +1210,8 @@ PG_API pg_status PG_CALL pg_tree_request_subtree(pg_tree *tree,
 	if (status != PG_OK)
 		goto request_done;
 	for (i = 0; i < tree->count; i++) {
-		status = pg_source_request_tree_subtree(tree->sources[i],
-			canonical, error);
+		status = pg_source_discover_tree(tree->sources[i],
+			canonical, depth, error);
 		if (status != PG_OK)
 			goto request_done;
 	}
@@ -1147,7 +1221,9 @@ PG_API pg_status PG_CALL pg_tree_request_subtree(pg_tree *tree,
 		goto request_done;
 	}
 	for (scope = tree->scopes; scope; scope = scope->next) {
-		if (!scope->exact && ((!scope->prefix && !canonical) ||
+		if (!scope->exact &&
+		    scope->shallow == (depth == PG_DISCOVER_CHILDREN) &&
+			((!scope->prefix && !canonical) ||
 		    (scope->prefix && canonical &&
 		     strcmp(scope->prefix, canonical) == 0)))
 			break;
@@ -1158,6 +1234,7 @@ PG_API pg_status PG_CALL pg_tree_request_subtree(pg_tree *tree,
 			status = PG_NOMEM;
 			goto request_done;
 		}
+		scope->shallow = depth == PG_DISCOVER_CHILDREN;
 		scope->prefix = canonical;
 		canonical = NULL;
 		scope->next = tree->scopes;
@@ -1167,8 +1244,7 @@ PG_API pg_status PG_CALL pg_tree_request_subtree(pg_tree *tree,
 	if (tree->watch_mode) {
 		reconciling = tree->reconciling;
 		tree->reconciling = 1;
-		status = pg_tree_files(tree, scope->prefix,
-			&snapshot, error);
+		status = pg_tree_scope_snapshot(tree, scope, &snapshot, error);
 		tree->reconciling = reconciling;
 	}
 	if (status == PG_OK) {
@@ -1188,6 +1264,12 @@ request_done:
 	pg_cursor_close(&snapshot, NULL);
 	free(canonical);
 	return status == PG_OK ? pg_result(PG_OK, error) : status;
+}
+
+PG_API pg_status PG_CALL pg_tree_request_subtree(pg_tree *tree,
+		const char *prefix, pg_error *error)
+{
+	return pg_tree_discover(tree, prefix, PG_DISCOVER_RECURSIVE, error);
 }
 
 static void pg_tree_records_free(pg_source_record *record)
@@ -1295,6 +1377,7 @@ void pg_tree_sources_discard(pg_tree *tree,
 		pg_tree_records_free(saved[i].records);
 		pg_tree_requests_free(saved[i].exact_requests);
 		pg_tree_requests_free(saved[i].prefix_requests);
+		pg_tree_requests_free(saved[i].shallow_requests);
 	}
 	free(saved);
 }
@@ -1330,6 +1413,12 @@ static pg_status pg_tree_sources_save_mode(pg_tree *tree,
 			if (!saved[i].exact_requests)
 				goto save_failed;
 		}
+		if (source->shallow_requests) {
+			saved[i].shallow_requests = pg_tree_requests_clone(
+				source->shallow_requests);
+			if (!saved[i].shallow_requests)
+				goto save_failed;
+		}
 		if (source->prefix_requests) {
 			saved[i].prefix_requests = pg_tree_requests_clone(
 				source->prefix_requests);
@@ -1362,9 +1451,11 @@ void pg_tree_sources_restore(pg_tree *tree,
 		pg_tree_records_free(source->records);
 		pg_tree_requests_free(source->exact_requests);
 		pg_tree_requests_free(source->prefix_requests);
+		pg_tree_requests_free(source->shallow_requests);
 		source->records = saved[i].records;
 		source->exact_requests = saved[i].exact_requests;
 		source->prefix_requests = saved[i].prefix_requests;
+		source->shallow_requests = saved[i].shallow_requests;
 		source->identity = saved[i].identity;
 		source->generation = saved[i].generation;
 		source->loose_root_requested =
@@ -1372,7 +1463,21 @@ void pg_tree_sources_restore(pg_tree *tree,
 		saved[i].records = NULL;
 		saved[i].exact_requests = NULL;
 		saved[i].prefix_requests = NULL;
+		saved[i].shallow_requests = NULL;
 	}
+}
+
+static pg_status pg_tree_refresh_scope(pg_source *source, pg_tree_scope *scope,
+		pg_error *error)
+{
+	if (scope->exact) {
+		if (!scope->reader_refs && !scope->managed)
+			return PG_OK;
+		return pg_source_refresh_name(source, scope->prefix, 0, error);
+	}
+	return pg_source_discover_tree(source, scope->prefix,
+		scope->shallow ? PG_DISCOVER_CHILDREN : PG_DISCOVER_RECURSIVE,
+		error);
 }
 
 /* Refresh requested tree scopes or all source observations. */
@@ -1399,10 +1504,8 @@ static pg_status pg_tree_rescan_mode(pg_tree *tree, pg_error *error,
 
 			for (scope = tree->scopes; scope;
 			     scope = scope->next) {
-				if (scope->exact)
-					continue;
-				status = pg_source_request_tree_subtree(source,
-					scope->prefix, error);
+				status = pg_tree_refresh_scope(source, scope,
+					error);
 				if (status != PG_OK)
 					break;
 			}
@@ -1462,6 +1565,7 @@ PG_API pg_status PG_CALL pg_tree_close(
 		free(scope);
 	}
 	pg_tree_scope_unlock(owned);
+	pg_tree_manage_discard(owned);
 	while (owned->count) {
 		pg_source *source = owned->sources[--owned->count];
 		int code = 0;

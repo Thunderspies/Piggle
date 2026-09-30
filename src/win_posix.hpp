@@ -44,9 +44,11 @@ struct pg_win_stat_type {
 	int64_t st_size;
 	int64_t st_atime;
 	int64_t st_mtime;
+	uint32_t st_mtime_nsec;
 	int64_t st_ctime;
 	unsigned int st_mode;
 	unsigned int st_nlink;
+	DWORD st_attributes;
 };
 
 static inline void pg_win_errno(DWORD code)
@@ -421,6 +423,7 @@ static inline int pg_win_fill_identity(HANDLE handle,
 		32) | info.ftLastWriteTime.dwLowDateTime;
 	state->st_mtime = (int64_t)(modified / 10000000ULL) -
 		11644473600LL;
+	state->st_mtime_nsec = (uint32_t)(modified % 10000000ULL) * 100u;
 	state->st_atime = state->st_mtime;
 	state->st_ctime = state->st_mtime;
 	state->st_mode = info.dwFileAttributes &
@@ -431,6 +434,7 @@ static inline int pg_win_fill_identity(HANDLE handle,
 	if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
 		state->st_mode = 0;
 	state->st_nlink = info.nNumberOfLinks;
+	state->st_attributes = info.dwFileAttributes;
 	return 0;
 }
 

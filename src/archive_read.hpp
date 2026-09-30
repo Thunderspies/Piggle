@@ -730,6 +730,7 @@ static inline pg_status pg_hogg_index(pg_source *source)
 		copy->info.mtime = (int32_t)pg_read_u32(record + 12);
 		copy->info.encoding = unpacked_size ? PG_ZLIB : PG_LOGICAL;
 		copy->info.digest_kind = PG_DIGEST_MD5_32;
+		copy->info.checksum_domain = source->checksum_domain;
 		memcpy(copy->info.digest, record + 16, 4);
 		copy->payload_offset = payload_offset;
 		*tail = copy;
@@ -777,12 +778,15 @@ static inline pg_status pg_archive_verify_payload(int fd,
 		if (status != PG_OK)
 			break;
 		remaining -= amount;
+		if (info->checksum_domain == PG_CHECKSUM_STORED)
+			pg_md5_update(&hash, input, amount);
 		if (info->encoding == PG_LOGICAL) {
 			if (amount > info->logical_size - decoded) {
 				status = PG_CORRUPT;
 				break;
 			}
-			pg_md5_update(&hash, input, amount);
+			if (info->checksum_domain == PG_CHECKSUM_LOGICAL)
+				pg_md5_update(&hash, input, amount);
 			decoded += amount;
 			continue;
 		}
@@ -801,7 +805,8 @@ static inline pg_status pg_archive_verify_payload(int fd,
 				status = PG_CORRUPT;
 				break;
 			}
-			pg_md5_update(&hash, output, produced);
+			if (info->checksum_domain == PG_CHECKSUM_LOGICAL)
+				pg_md5_update(&hash, output, produced);
 			decoded += produced;
 			if (result == Z_STREAM_END) {
 				ended = 1;

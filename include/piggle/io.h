@@ -33,9 +33,9 @@ PG_API pg_status PG_CALL pg_reader_open_tree(pg_tree *tree,
 		const char *name, uint32_t representation, pg_reader **out,
 		pg_error *error);
 
-/* Open independent sequential reader at zero for captured physical copy.
+/* Open independent reader at zero for captured physical copy.
  * READ_LOGICAL decodes; READ_STORED exposes its exact stored bytes. Both
- * validate available logical digests at EOF; stored reads still decode for
+ * validate available profile-selected digests at EOF; stored reads decode for
  * validation. Retains file/source. Changed identity -> STALE. Owned reader.
  * A tree-selected file starts name tracking while its reader is open if that
  * tree is still live and watching; tree close ends tracking, not reading.
@@ -60,6 +60,26 @@ PG_API pg_status PG_CALL pg_reader_open_native(
 /* Immediate fixed metadata copy; out required, zero on failure. */
 PG_API pg_status PG_CALL pg_reader_inspect(pg_reader *reader,
 		pg_reader_info *out, pg_error *error);
+
+/* Reposition to an absolute byte offset in this reader's representation.
+ * Accept 0 through inspected size, inclusive. Invalid offset/failed reader
+ * -> INVALID without changing position. Same selection and worker-thread
+ * serialization as read; never reselect a replaced file. Revalidate native
+ * identity even for a no-op seek. Native failure -> close-only reader.
+ * Compressed logical seeks use private bounded decoder checkpoints and may
+ * decode forward; operational failure makes the reader close-only. Seeking
+ * to EOF does not verify content: the next positive read verifies before END.
+ * No returned storage, content mutation or change to other readers.
+ */
+PG_API pg_status PG_CALL pg_reader_seek(pg_reader *reader,
+		uint64_t offset, pg_error *error);
+
+/* Immediate current byte offset in the chosen representation, including a
+ * close-only reader's last position. out required and initially zero on
+ * failure. No native I/O or verification. Serialize with this reader.
+ */
+PG_API pg_status PG_CALL pg_reader_tell(pg_reader *reader,
+		uint64_t *out, pg_error *error);
 
 /* Read at most capacity bytes in the reader representation. NULL buffer
  * allowed only at capacity=0; empty spans are never accessed. bytes required,

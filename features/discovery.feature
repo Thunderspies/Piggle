@@ -80,3 +80,71 @@ Feature: Explicit loose discovery and indexed enumeration
     When an editor removes "menu/a" and I find it again
     Then find returns the cached selection and metadata
     And opening that physical copy reports stale
+
+  @DISCOVERY-015
+  Scenario: A shallow request permits pruning before traversal
+    Given a loose root contains an empty directory and a nested file
+    When I discover only its immediate children
+    Then I can list its files and child directories
+    And recursive listing still reports incomplete coverage
+    And child directories are never opened until requested
+
+  @DISCOVERY-011
+  Scenario: Manage native paths without indexing files
+    Given a tree with a loose source and an unqueried nested file
+    When I manage the root recursively and enable native observation
+    Then recursive listing still requires discovery
+    And editing the unqueried file reports an invalidation
+    When I query the file and edit it again
+    Then the next report includes its before and after metadata
+
+  @DISCOVERY-012
+  Scenario: Manage known absence and directories
+    Given native management of a loose root
+    And a lookup has established that a managed name is absent
+    When that name is created
+    Then an addition is reported
+    And directory changes are observable without file changes
+
+  @DISCOVERY-013
+  Scenario: Scan management establishes a baseline
+    Given a managed loose scope with no prior discovery
+    When I enable scan observation
+    Then the scope is discovered at the registered depth
+    And subsequent polls compare its visible entries
+
+  @DISCOVERY-014
+  Scenario: Restore management after a loose root disappears
+    Given a managed loose root with discovered and unknown paths
+    When the root is moved away
+    Then polling reports loss and scope invalidation
+    And it does not recursively discover unknown paths
+    When a directory is created at the original root path
+    Then native monitoring resumes there
+    And previous selections cannot silently retarget to the new root
+
+  @DISCOVERY-016
+  Scenario: Discovery while watching includes existing directories
+    Given native observation of a managed scope with an empty directory
+    When I discover the scope and a file is edited
+    Then only the file transition is reported
+    And the existing directory does not produce an initial addition
+
+  @DISCOVERY-017
+  Scenario: Managed setup and root repair preserve failed observations
+    Given cached metadata in a managed loose scope and an attached archive
+    When watch setup or root replacement refresh encounters a corrupt archive
+    Then the refresh fails without replacing prior cached observations
+
+  @DISCOVERY-018
+  Scenario: Callback lookup leaves new loss for the next poll
+    Given a visible report is being delivered
+    When callback lookup detects a root replacement
+    Then its loss and scope invalidation wait for the next poll
+
+  @DISCOVERY-019
+  Scenario: Monitoring follows a renamed directory
+    Given native management with a known file and a known absent destination
+    When its parent directory is renamed inside the root
+    Then the old name is removed and the new name is added
+    And subsequent file edits are reported under the new name

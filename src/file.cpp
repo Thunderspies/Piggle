@@ -168,6 +168,11 @@ PG_API pg_status PG_CALL pg_file_export(
 	options.entry.digest_kind = file->info.digest_kind;
 	memcpy(options.entry.expected_digest, file->info.digest,
 		sizeof(options.entry.expected_digest));
+	if (file->info.checksum_domain == PG_CHECKSUM_STORED) {
+		options.entry.digest_kind = PG_DIGEST_NONE;
+		memset(options.entry.expected_digest, 0,
+			sizeof(options.entry.expected_digest));
+	}
 	uint8_t zero[16] = {};
 
 	if (memcmp(file->info.digest, zero, sizeof(zero)) == 0)
@@ -242,7 +247,7 @@ PG_API pg_status PG_CALL pg_cursor_next(pg_cursor *cursor, pg_file **out,
 
 /* Read the selected logical stream and verify its stored digest. */
 /* Report NO_CHECKSUM when explicit verification lacks a digest. */
-PG_API pg_status PG_CALL pg_file_verify(
+static pg_status pg_file_verify_locked(
 		pg_file *file,
 		pg_error *error)
 {
@@ -251,6 +256,8 @@ PG_API pg_status PG_CALL pg_file_verify(
 	pg_status status;
 	int fd;
 	int native_code = 0;
+	uint64_t offset = file ? file->payload_offset : 0;
+	const struct stat *identity;
 
 	if (!file)
 		return pg_result(PG_INVALID, error);
@@ -259,6 +266,21 @@ PG_API pg_status PG_CALL pg_file_verify(
 	status = pg_source_control_status(file->source, 0);
 	if (status != PG_OK)
 		return pg_result(status, error);
+	identity = &file->source_identity;
+	if (file->source->format == PG_HOGG10) {
+		pg_source_record *record;
+
+		for (record = file->source->records; record; record =
+			record->next)
+			if (record->info.copy_id == file->info.copy_id &&
+			    record->info.copy_generation ==
+				file->info.copy_generation)
+				break;
+		if (!record)
+			return pg_result(PG_STALE, error);
+		offset = record->payload_offset;
+		identity = &file->source->identity;
+	}
 	fd = open(file->source->format == PG_LOOSE ?
 		file->native_path : file->source->native_path,
 		O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
@@ -273,7 +295,7 @@ PG_API pg_status PG_CALL pg_file_verify(
 		close(fd);
 		return pg_native_result(PG_IO, native_code, error);
 	}
-	if (!pg_native_stat_same(&file->source_identity, &opened) ||
+	if (!pg_native_stat_same(identity, &opened) ||
 	    !pg_native_stat_same(&opened, &current)) {
 		close(fd);
 		return pg_result(PG_STALE, error);
@@ -283,12 +305,23 @@ PG_API pg_status PG_CALL pg_file_verify(
 		return pg_result(PG_NO_CHECKSUM, error);
 	}
 	status = pg_archive_verify_payload(fd, (uint64_t)opened.st_size,
-		&file->info, file->payload_offset, 1);
+		&file->info, offset, 1);
 	if (close(fd) && status == PG_OK) {
 		native_code = errno;
 		status = PG_IO;
 	}
 	return pg_native_result(status, native_code, error);
+}
+
+PG_API pg_status PG_CALL pg_file_verify(pg_file *file, pg_error *error)
+{
+	if (!file)
+		return pg_result(PG_INVALID, error);
+	pg_source_lock(file->source);
+	pg_status status = pg_file_verify_locked(file, error);
+
+	pg_source_unlock(file->source);
+	return status;
 }
 
 /* Delete one captured loose file after checking its physical identity. */
@@ -469,3 +502,79 @@ PG_API pg_status PG_CALL pg_cursor_close(
 }
 
 } /* extern "C" */
+
+/* Validate capture and fields, then publish only selected metadata. */
+pg_status pg_file_update_metadata(pg_file *file,
+		const pg_metadata_options *options, pg_error *error)
+{
+	pg_status status;
+	struct stat current;
+	int fd, parent = -1, native_code = 0, published = 0;
+	char *leaf = NULL;
+
+	if (!file || !options ||
+	    (options->fields & ~(PG_METADATA_MTIME | PG_METADATA_HEADER)) ||
+	    ((options->fields & PG_METADATA_HEADER) &&
+	     options->cached_header_size && !options->cached_header))
+		return pg_result(PG_INVALID, error);
+	if (file->source->recovery_required)
+		return pg_result(PG_RECOVERY_REQUIRED, error);
+	status = pg_source_control_status(file->source, 1);
+	if (status != PG_OK)
+		return pg_result(status, error);
+	if (file->source->access != PG_WRITE)
+		return pg_result(PG_READ_ONLY, error);
+	if ((options->fields & PG_METADATA_HEADER) &&
+	    options->cached_header_size > UINT32_MAX)
+		return pg_result(PG_LIMIT, error);
+	if (file->source->format != PG_LOOSE)
+		return pg_file_delete_queued(file,
+			pg_source_update_metadata(file, options, error), error);
+	if (options->fields & PG_METADATA_HEADER)
+		return pg_result(PG_UNSUPPORTED, error);
+	if (file->source->live_writers)
+		return pg_result(PG_BUSY, error);
+	if ((options->fields & PG_METADATA_MTIME) &&
+	    (int64_t)(time_t)options->mtime != options->mtime)
+		return pg_result(PG_LIMIT, error);
+	status = pg_native_parent_open(file->native_path, 0, &parent, &leaf,
+		&native_code);
+	if (status != PG_OK)
+		return pg_native_result(status, native_code, error);
+	fd = openat(parent, leaf, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+	free(leaf);
+	close(parent);
+	if (fd < 0)
+		return pg_native_result(errno == ENOENT ? PG_STALE : PG_IO,
+			errno, error);
+	if (fstat(fd, &current)) {
+		status = PG_IO;
+		native_code = errno;
+	} else if (!pg_native_stat_same(&file->source_identity, &current)) {
+		status = PG_STALE;
+	} else if ((options->fields & PG_METADATA_MTIME) &&
+		   options->mtime != file->info.mtime) {
+		struct timespec times[2] = {};
+
+		times[0].tv_sec = current.st_atime;
+		times[1].tv_sec = (time_t)options->mtime;
+		if (futimens(fd, times)) {
+			status = PG_IO;
+			native_code = errno;
+		} else {
+			published = 1;
+			if (fsync(fd)) {
+				status = PG_COMMITTED;
+				native_code = errno;
+			}
+		}
+	}
+	if (close(fd) && status == PG_OK) {
+		status = published ? PG_COMMITTED : PG_IO;
+		native_code = errno;
+	}
+	pg_native_result(status, native_code, error);
+	if (status == PG_COMMITTED && error)
+		error->cause = PG_IO;
+	return pg_file_delete_queued(file, status, error);
+}

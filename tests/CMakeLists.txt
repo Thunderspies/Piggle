@@ -55,7 +55,26 @@ add_executable(piggle_api_flows api_flows.c)
 target_link_libraries(piggle_api_flows PRIVATE piggle::piggle)
 add_executable(piggle_api_stream api_stream.c)
 target_link_libraries(piggle_api_stream PRIVATE piggle::piggle)
+add_executable(piggle_api_seek api_seek.c)
+target_link_libraries(piggle_api_seek PRIVATE piggle::piggle)
+foreach(case IN ITEMS native empty stale checksum pigg_raw hogg_raw pigg_zlib
+		hogg_zlib pigg_stored hogg_stored pigg_evict)
+	set(case_dir "${CMAKE_CURRENT_BINARY_DIR}/seek_${case}")
+	file(MAKE_DIRECTORY "${case_dir}")
+	add_test(NAME api_seek_${case} COMMAND piggle_api_seek ${case})
+	set_tests_properties(api_seek_${case} PROPERTIES
+		WORKING_DIRECTORY "${case_dir}" LABELS contract TIMEOUT 180)
+endforeach()
 add_executable(piggle_api_discovery api_discovery.c)
+add_executable(piggle_api_entries api_entries.c)
+target_link_libraries(piggle_api_entries PRIVATE piggle::piggle)
+foreach(case IN ITEMS loose tree pigg hogg metadata shallow)
+	set(case_dir "${CMAKE_CURRENT_BINARY_DIR}/entries_${case}")
+	file(MAKE_DIRECTORY "${case_dir}")
+	add_test(NAME api_entries_${case} COMMAND piggle_api_entries ${case})
+	set_tests_properties(api_entries_${case} PROPERTIES
+		WORKING_DIRECTORY "${case_dir}" LABELS contract)
+endforeach()
 target_link_libraries(piggle_api_discovery PRIVATE piggle::piggle)
 add_executable(piggle_api_regressions api_regressions.c)
 target_link_libraries(piggle_api_regressions PRIVATE piggle::piggle
@@ -65,11 +84,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	add_library(piggle_journal_fault SHARED journal_fault.c)
 	target_link_libraries(piggle_api_regressions PRIVATE
 		piggle_journal_fault)
-	list(APPEND journal_cases journal_1 journal_2 journal_3 journal_4)
+	list(APPEND journal_cases journal_1 journal_2 journal_3 journal_4
+		metadata_fault_1 metadata_fault_2 metadata_fault_3 metadata_fault_4)
 endif()
 set(windows_path_cases)
 if(WIN32)
-	list(APPEND windows_path_cases windows_absolute windows_unicode
+	list(APPEND windows_path_cases windows_subsecond
+		windows_absolute windows_unicode
 		windows_native)
 	if(TARGET piggle_cli)
 		target_compile_definitions(piggle_api_regressions PRIVATE
@@ -83,8 +104,9 @@ if(UNIX)
 	list(APPEND loose_collision_cases loose_collisions posix_basename)
 endif()
 foreach(case IN ITEMS retained_unpack pigg_controls hogg_controls
+		hogg_busy
 		loose_writer_ancestor ${windows_path_cases} scan_baseline
-		native_baseline scan_rollback native_rollback watch_repair
+		native_baseline scan_rollback native_rollback root_rollback watch_repair
 		watch_worker short_datalist compressed_datalist ${journal_cases}
 		normalized ancestor ${loose_collision_cases} empty_cursor
 		exhausted_cursor loose_lease loose_alias worker_reader
@@ -186,3 +208,40 @@ if(UNIX)
 			WORKING_DIRECTORY "${case_dir}" LABELS contract)
 	endforeach()
 endif()
+
+add_executable(piggle_api_checksum api_checksum.c)
+target_link_libraries(piggle_api_checksum PRIVATE piggle::piggle)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/checksum")
+add_test(NAME api_checksum COMMAND piggle_api_checksum)
+set_tests_properties(api_checksum PROPERTIES
+	WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/checksum" LABELS contract)
+
+add_executable(piggle_api_metadata api_metadata.c)
+target_link_libraries(piggle_api_metadata PRIVATE piggle::piggle)
+foreach(case IN ITEMS pigg hogg loose)
+	file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/metadata_${case}")
+	add_test(NAME api_metadata_${case} COMMAND piggle_api_metadata ${case})
+	set_tests_properties(api_metadata_${case} PROPERTIES LABELS contract
+		WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/metadata_${case}")
+endforeach()
+
+add_executable(piggle_api_managed api_managed.c)
+target_link_libraries(piggle_api_managed PRIVATE piggle)
+set(managed_cases native native_root scan finite)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	list(APPEND managed_cases rename)
+endif()
+foreach(mode IN LISTS managed_cases)
+	file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/managed_${mode}/root/deep")
+	add_test(NAME api_managed_${mode} COMMAND piggle_api_managed ${mode})
+	set_tests_properties(api_managed_${mode} PROPERTIES
+		WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/managed_${mode}"
+		LABELS contract)
+endforeach()
+
+add_executable(piggle_api_lease api_lease.c)
+target_link_libraries(piggle_api_lease PRIVATE piggle)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lease")
+add_test(NAME api_lease COMMAND piggle_api_lease)
+set_tests_properties(api_lease PROPERTIES
+	WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lease" LABELS contract)

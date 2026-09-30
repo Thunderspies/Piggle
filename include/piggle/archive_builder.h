@@ -24,6 +24,16 @@ PG_API pg_status PG_CALL pg_archive_builder_create(
 		pg_archive_builder **out,
 		pg_error *error);
 
+/* Create with an explicit checksum profile. options is required, copied
+ * before return. Same ownership, publication and control rules as create.
+ * Unknown values -> INVALID; STORED with PIGG2 -> UNSUPPORTED. NULL output
+ * on failure. The original create function selects LOGICAL checksums.
+ */
+PG_API pg_status PG_CALL pg_archive_builder_create_options(
+		pg_context *context, const char *native_path,
+		const pg_archive_options *options, pg_archive_builder **out,
+		pg_error *error);
+
 /* Stage complete entries; use io.h for chunked or encoded input. */
 /* Stage one complete logical entry; no external commitment until builder
  * finish. NULL entry -> defaults; NULL buffer allowed only at size=0. Empty

@@ -94,6 +94,10 @@ The checksum bytes are not a numeric MD5 word to be reordered. Compute the
 standard 16-byte MD5 digest over the logical, decompressed payload and copy
 digest bytes 0 through 3 verbatim. For example, MD5(`"abc"`) begins
 `90 01 50 98`, which are the four bytes stored in the record.
+MissionServer user archives can instead store the MD5 prefix of the stored
+payload bytes. This is an explicit caller-selected profile, not a wire tag
+or a fallback on mismatch. It does not change the internal DataList checksum.
+
 There is no separate checksum-present bit. Readers should treat an all-zero
 prefix as unavailable. A new writer should always store the computed prefix,
 including `d4 1d 8c d9` for an empty logical payload.

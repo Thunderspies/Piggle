@@ -109,8 +109,10 @@ pg_status pg_pack_cursor(pg_cursor **cursor, const char *native_archive,
 	pg_file *file = NULL;
 	pg_error work_error, close_error;
 	pg_status closed;
-	pg_status status = pg_archive_builder_create((*cursor)->context,
-		native_archive, format, options->flags, &builder, &work_error);
+	pg_archive_options profile = { format, options->flags,
+		options->checksum_domain };
+	pg_status status = pg_archive_builder_create_options((*cursor)->context,
+		native_archive, &profile, &builder, &work_error);
 
 	if (status != PG_OK)
 		goto pack_done;
@@ -369,6 +371,8 @@ PG_API pg_status PG_CALL pg_archive_builder_copy(
 			digest_size) != 0) {
 			options.entry.digest_kind =
 				input->info.digest_kind;
+			options.entry.expected_digest_domain =
+				input->info.checksum_domain;
 			memcpy(options.entry.expected_digest,
 				input->info.digest, digest_size);
 		}
@@ -380,7 +384,7 @@ PG_API pg_status PG_CALL pg_archive_builder_copy(
 /* Reject live entry writers; finalize all staged entries. */
 /* Validate complete archive and publish once at native destination. */
 /* Report commitment or uncertain outcome after cleanup. */
-PG_API pg_status PG_CALL pg_archive_builder_finish(
+static pg_status pg_archive_builder_finish_locked(
 		pg_archive_builder *builder,
 		pg_error *error)
 {
@@ -574,3 +578,46 @@ PG_API pg_status PG_CALL pg_archive_builder_close(
 }
 
 } /* extern "C" */
+
+/* Validate profile and create private archive staging. */
+pg_status pg_archive_builder_create_options(pg_context *context,
+		const char *path, const pg_archive_options *options,
+		pg_archive_builder **out, pg_error *error)
+{
+	if (out)
+		*out = NULL;
+	if (!out || !options ||
+	    options->checksum_domain > PG_CHECKSUM_STORED)
+		return pg_result(PG_INVALID, error);
+	if (options->checksum_domain == PG_CHECKSUM_STORED &&
+	    options->format != PG_HOGG10)
+		return pg_result(PG_UNSUPPORTED, error);
+	pg_status status = pg_archive_builder_create(context, path,
+		options->format, options->flags, out, error);
+
+	if (status == PG_OK)
+		(*out)->checksum_domain = options->checksum_domain;
+	return status;
+}
+
+pg_status pg_archive_builder_finish(pg_archive_builder *builder,
+		pg_error *error)
+{
+	if (!builder || builder->finished)
+		return pg_result(PG_INVALID, error);
+	if (builder->live_writers)
+		return pg_result(PG_BUSY, error);
+	int lease = -1, native_code = 0;
+	pg_status status = pg_native_target_lease(builder->native_path,
+		builder->target_exists, &lease, &native_code);
+
+	if (status == PG_OK)
+		status = pg_archive_builder_finish_locked(builder, error);
+	else {
+		builder->finished = 1;
+		pg_native_result(status, native_code, error);
+	}
+	if (lease >= 0)
+		close(lease);
+	return status;
+}

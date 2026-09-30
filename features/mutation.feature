@@ -85,3 +85,42 @@ Feature: Physical deletion and format-aware archive editing
     And the change is detected before commitment
     Then the import fails as stale or retryable
     And the external edit remains published after reconciliation
+
+  @EDIT-011
+  Scenario: Rejected HOGG writes preserve an unrelated reader
+    Given a HOGG reader is open on an unchanged entry
+    When a conflicting mutation is rejected as busy
+    Then the archive bytes remain unchanged
+    And the reader remains usable
+    And releasing the conflicting writer lease permits another write
+    And no explicit rescan is required
+
+  @EDIT-012
+  Scenario: HOGG readers coexist with unrelated mutations
+    Given a reader has selected one HOGG entry
+    When unrelated entries are added and archive tables grow
+    Then the reader can still read and seek its original entry
+    When its selected entry is replaced
+    Then the reader reports stale without selecting the new entry
+
+  @EDIT-013
+  Scenario: Only one writable HOGG source owns the archive
+    Given a writable HOGG source retains its OS lease
+    When another context or process requests writable access
+    Then that open returns busy without modifying the archive
+    And final reference release permits a subsequent writable open
+
+  @EDIT-014
+  Scenario: Metadata edits preserve encoded content
+    Given a writable captured archive entry with a cached header
+    When I change only its timestamp and later clear its header
+    Then its encoding, payload bytes and checksum remain unchanged
+    And each successful change invalidates the old captured generation
+    And a HOGG timestamp change does not grow its payload
+
+  @EDIT-015
+  Scenario: Recovery serializes with individual HOGG reader operations
+    Given a retained HOGG reader and an externally committed journal
+    When I recover the archive with no staged writer
+    Then recovery completes while the reader handle remains open
+    And the old reader reports stale for the externally changed archive

@@ -69,7 +69,7 @@ writes changes and releases the archive while failure leaves it to the caller.
 
 ### Caller-sized streaming
 
-Piggle exposes sequential readers and staged writers. The caller decides each
+Piggle exposes seekable readers and staged writers. The caller decides each
 transfer size and can yield between calls. Blocking helpers compose these same
 primitives. Opening, indexing, finishing and publishing may still block within
 a call. The unpack target pins a captured cursor and native root, preflights the
@@ -85,9 +85,9 @@ without a terminator.
 
 GIO requests file monitoring explicitly. libuv separates native file events
 from stat-based polling. Piggle therefore leaves new trees unwatched and lets
-the caller choose native or scan observation. Open tree readers and requested
-tree-requested subtrees define the monitored scopes; callers poll for visible
-changes.
+the caller choose native or scan observation. Managed scopes, discovered
+subtrees and open tree readers define observation coverage. Native management can remain lazy; callers poll for visible changes
+or invalidations when prior state is unknown.
 
 [GLib allocated reads](https://docs.gtk.org/glib/func.file_get_contents.html),
 [GIO monitoring](https://docs.gtk.org/gio/method.File.monitor.html),
@@ -101,10 +101,10 @@ changes.
 | Attach sources in order | Callers choose roots explicitly; later attachments win exact-name conflicts without numeric ranks or timestamp policies. |
 | Let directories win | A directory and its descendants remain reachable even when another source has a same-name file. |
 | Index archives on open, discover loose paths on request | Archive formats have no pathname index; loose exact lookup can probe native paths, while subtree requests pay for a recursive scan. |
-| Require a subtree request before loose listing | A listing is a traversal of a complete index, not an implicit filesystem scan. INVALID rejects an incomplete view. |
+| Require coverage at the listing depth | Shallow discovery visits immediate entries; recursive discovery covers descendants. Snapshots use indexed metadata. INVALID rejects an incomplete view. |
 | Retain requested subtrees | Repeated listings and exact reads within a scope reuse known names. Native watching can maintain requested tree scopes; without it, callers explicitly refresh. |
 | Expose only visible copies | Common lookup and enumeration have one outcome per name. Existing archive duplicates may be validated but are not public selections. |
-| Watch only requested scopes | A tree starts OFF; open tree readers and tree-requested subtrees supply the paths monitored by NATIVE or SCAN mode. |
+| Separate management from discovery | A tree starts OFF. Managed native scopes need no file baseline; requested scopes and tree readers add known observations. SCAN requires discovery. |
 | Let callers size transfers | Readers and writers return exact counts; callers can yield between calls, while finish and indexing may block. |
 | Keep caller-sized chunks synchronous | Applications control transfer scheduling by choosing chunk sizes. |
 | Require an archive builder | Constructing a new archive needs one private staging area and publication boundary; duplicate canonical names fail. |
@@ -124,7 +124,7 @@ rules.
 | Named reader or export | Select once, open or export the retained file, then release the temporary selection. |
 | Read all | Inspect captured length, enforce capacity, read through verified EOF, then clean up. |
 | Pack and unpack | Enumerate visible files and transfer them through builder or native writers. |
-| Watch and poll | Baseline active readers and requested prefixes, reconcile only tracked scopes, then deliver visible reports. |
+| Watch and poll | Retain native hint paths, refresh affected known names, and invalidate unknown managed names in the visible feed. |
 
 The initial subtree scan should normalize each discovered path once and avoid
 an exact path probe for every file. Source selection and tree overlay merging
@@ -145,8 +145,8 @@ proportion to the requested scope.
 
 Piggle uses explicit C ownership, known-length sequential writes, bounded
 allocated reads, binary results without implicit terminators, explicit mutation
-commitment, and separate builder publication. It does not provide seek, append,
-partial in-place file editing, historical event reads, automatic mutation
+commitment, and separate builder publication. It does not provide writer seek,
+append, partial in-place file editing, historical event reads, automatic mutation
 retries, custom allocators, custom format plugins, or an owning callback/event
 framework.
 

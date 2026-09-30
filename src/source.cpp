@@ -458,7 +458,7 @@ cleanup_probe:
 
 static pg_status pg_source_loose_add(pg_source *source,
 		const char *canonical, const char *original,
-		const struct stat *identity)
+		const struct stat *identity, uint32_t attributes)
 {
 	pg_source_record *record;
 	char *native;
@@ -488,13 +488,29 @@ static pg_status pg_source_loose_add(pg_source *source,
 	}
 	record->native_path = native;
 	record->identity = *identity;
+	record->attributes = attributes;
+#ifdef _WIN32
+	if (identity->st_attributes & FILE_ATTRIBUTE_HIDDEN)
+		record->attributes |= PG_ENTRY_HIDDEN;
+	if (identity->st_attributes & FILE_ATTRIBUTE_SYSTEM)
+		record->attributes |= PG_ENTRY_SYSTEM;
+	if (!(identity->st_mode & _S_IWRITE))
+#else
+	const char *basename = strrchr(original, '/');
+
+	if ((basename ? basename[1] : original[0]) == '.')
+		record->attributes |= PG_ENTRY_HIDDEN;
+	if (!(identity->st_mode & 0222))
+#endif
+		record->attributes |= PG_ENTRY_READ_ONLY;
 	record->info.source_id = source->id;
 	record->info.source_generation = source->generation;
 	record->info.copy_id = source->context->next_id++;
 	record->info.copy_generation = 1;
 	record->info.archive_record = UINT64_MAX;
-	record->info.logical_size = (uint64_t)identity->st_size;
-	record->info.stored_size = (uint64_t)identity->st_size;
+	record->info.logical_size = S_ISDIR(identity->st_mode) ? 0 :
+		(uint64_t)identity->st_size;
+	record->info.stored_size = record->info.logical_size;
 	record->info.mtime = identity->st_mtime;
 	record->info.encoding = PG_LOGICAL;
 	record->next = source->records;
@@ -509,6 +525,9 @@ static int pg_source_record_name_compare(const void *left,
 	const pg_source_record *b = *(pg_source_record *const *)right;
 	int order = strcmp(a->info.canonical_name, b->info.canonical_name);
 
+	if (!order &&
+		S_ISDIR(a->identity.st_mode) != S_ISDIR(b->identity.st_mode))
+		return S_ISDIR(a->identity.st_mode) ? 1 : -1;
 	return order ? order : strcmp(a->info.original_name,
 		b->info.original_name);
 }
@@ -678,6 +697,23 @@ static pg_status pg_source_loose_scan_fallback(pg_source *source, int dir,
 			continue;
 		}
 		if (status == PG_OK && S_ISDIR(found.st_mode)) {
+			status = pg_source_loose_add(source, canonical,
+				next + 1, &found, 0);
+			if (status != PG_OK) {
+				free(canonical);
+				free(next);
+				break;
+			}
+			if (source->scan_shallow &&
+			    (!wanted || pg_descendant_order(canonical,
+				wanted) == 0 ||
+			     (source->scan_shallow == 2 && !strcmp(canonical,
+				wanted)))) {
+				free(canonical);
+				free(next);
+				errno = 0;
+				continue;
+			}
 			child = openat(dir, item->d_name,
 				O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
 				O_CLOEXEC);
@@ -694,7 +730,7 @@ static pg_status pg_source_loose_scan_fallback(pg_source *source, int dir,
 			 (strncmp(canonical, wanted, strlen(wanted)) == 0 &&
 			  canonical[strlen(wanted)] == '/'))) {
 			status = pg_source_loose_add(source, canonical,
-				next + 1, &found);
+				next + 1, &found, 0);
 		}
 		free(canonical);
 		free(next);
@@ -899,6 +935,9 @@ static pg_status pg_source_loose_scan_windows(pg_source *source,
 				entry->EndOfFile.QuadPart;
 			found.st_mtime = entry->LastWriteTime.QuadPart /
 				10000000LL - 11644473600LL;
+			found.st_mtime_nsec = (uint32_t)(
+				entry->LastWriteTime.QuadPart %
+				10000000LL) * 100u;
 			found.st_atime = found.st_mtime;
 			found.st_ctime = found.st_mtime;
 			found.st_mode = entry->FileAttributes &
@@ -912,6 +951,25 @@ static pg_status pg_source_loose_scan_windows(pg_source *source,
 				size_t root_length = wcslen(directory);
 				size_t name_length =
 					entry->FileNameLength / sizeof(WCHAR);
+				uint32_t attributes =
+					(entry->FileAttributes &
+					 FILE_ATTRIBUTE_HIDDEN ?
+					 PG_ENTRY_HIDDEN : 0) |
+					(entry->FileAttributes &
+					 FILE_ATTRIBUTE_SYSTEM ?
+					 PG_ENTRY_SYSTEM : 0);
+
+				status = pg_source_loose_add(source, canonical,
+					next + 1, &found, attributes);
+				if (status != PG_OK)
+					goto next_entry;
+
+				if (source->scan_shallow &&
+				    (!wanted || pg_descendant_order(canonical,
+					wanted) == 0 ||
+				     (source->scan_shallow == 2 &&
+				      !strcmp(canonical, wanted))))
+					goto next_entry;
 
 				if (root_length > SIZE_MAX / sizeof(WCHAR) -
 				    name_length - 2) {
@@ -960,7 +1018,13 @@ static pg_status pg_source_loose_scan_windows(pg_source *source,
 				    strlen(wanted)) == 0 &&
 				    canonical[strlen(wanted)] == '/')) {
 				status = pg_source_loose_add(source, canonical,
-					next + 1, &found);
+					next + 1, &found,
+					(entry->FileAttributes &
+					 FILE_ATTRIBUTE_HIDDEN ?
+					 PG_ENTRY_HIDDEN : 0) |
+					(entry->FileAttributes &
+					 FILE_ATTRIBUTE_SYSTEM ?
+					 PG_ENTRY_SYSTEM : 0));
 			}
 next_entry:
 			if (status != PG_OK)
@@ -1072,7 +1136,8 @@ static int pg_source_request_covered(pg_source *source,
 }
 
 static pg_status pg_source_loose_scan_private(pg_source *source,
-		const char *prefix, int *native_code, int tree_request)
+		const char *prefix, int *native_code, int tree_request,
+		int shallow = 0)
 {
 	pg_source probe = *source;
 	pg_source_record *old, *next;
@@ -1081,11 +1146,31 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 	pg_status status;
 
 	probe.records = NULL;
-	status = pg_source_loose_scan(&probe, source->fd, "",
-		prefix, native_code);
+	probe.scan_shallow = shallow;
+	status = source->fd < 0 ? PG_OK :
+		pg_source_loose_scan(&probe, source->fd, "", prefix,
+			native_code);
 	if (status != PG_OK) {
 		pg_source_records_free(probe.records);
 		return status;
+	}
+	/* Ancestors traversed to reach the prefix are not new coverage. */
+	pg_source_record **at = &probe.records;
+
+	while (*at) {
+		pg_source_record *record = *at;
+		int keep = shallow == 2 ?
+			!strcmp(record->info.canonical_name, prefix) :
+			pg_name_in_scope(record->info.canonical_name, prefix,
+				!shallow);
+
+		if (keep) {
+			at = &record->next;
+			continue;
+		}
+		*at = record->next;
+		record->next = NULL;
+		pg_source_records_free(record);
 	}
 	status = pg_source_loose_compact(&probe);
 	if (status != PG_OK) {
@@ -1113,8 +1198,9 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 	for (old = source->records; old; old = old->next) {
 		pg_source_record *found;
 
-		if (!pg_source_in_prefix(old->info.canonical_name,
-			prefix))
+		if (shallow == 2 ? strcmp(old->info.canonical_name, prefix) :
+		    !pg_name_in_scope(old->info.canonical_name, prefix,
+			!shallow))
 			continue;
 		found = pg_source_record_index_find(items, count,
 			old->info.canonical_name);
@@ -1132,8 +1218,9 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 		pg_source_record *found;
 
 		next = old->next;
-		if (!pg_source_in_prefix(old->info.canonical_name,
-			prefix)) {
+		if (shallow == 2 ? strcmp(old->info.canonical_name, prefix) :
+		    !pg_name_in_scope(old->info.canonical_name, prefix,
+			!shallow)) {
 			old->next = source->records;
 			source->records = old;
 			old = next;
@@ -1155,6 +1242,99 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 	}
 	free(items);
 	return PG_OK;
+}
+
+/* Rebind a managed root after replacement without traversing its files. */
+extern "C" pg_status pg_source_rebind_root(pg_source *source,
+		int *changed, pg_root_binding **saved, pg_error *error)
+{
+	struct stat current, opened;
+	int fd = -1;
+
+	*changed = 0;
+	if (lstat(source->native_path, &current)) {
+		if (errno != ENOENT && errno != ENOTDIR)
+			return pg_native_result(PG_IO, errno, error);
+		if (source->fd < 0)
+			return PG_OK;
+	} else {
+		if (!S_ISDIR(current.st_mode))
+			return pg_result(PG_CONFLICT, error);
+		if (source->fd >= 0 &&
+			current.st_dev == source->identity.st_dev &&
+		    current.st_ino == source->identity.st_ino)
+			return PG_OK;
+		fd = open(source->native_path, O_RDONLY | O_DIRECTORY |
+			O_NOFOLLOW | O_CLOEXEC);
+		if (fd < 0)
+			return pg_native_result(PG_IO, errno, error);
+		if (fstat(fd, &opened) || !pg_native_stat_same(&current,
+			&opened)) {
+			close(fd);
+			return pg_result(PG_RETRY, error);
+		}
+	}
+	if (source->generation == UINT64_MAX) {
+		if (fd >= 0)
+			close(fd);
+		return pg_result(PG_LIMIT, error);
+	}
+	pg_root_binding *binding = (pg_root_binding *)malloc(sizeof(*binding));
+
+	if (!binding) {
+		if (fd >= 0)
+			close(fd);
+		return pg_result(PG_NOMEM, error);
+	}
+	binding->source = source;
+	binding->fd = source->fd;
+	binding->records = source->records;
+	binding->identity = source->identity;
+	binding->generation = source->generation;
+	binding->next = *saved;
+	*saved = binding;
+	source->fd = fd;
+	if (fd >= 0)
+		source->identity = opened;
+	source->generation++;
+	source->records = NULL;
+	*changed = 1;
+	return PG_OK;
+}
+
+/* Keep prior observations available until the whole refresh succeeds. */
+extern "C" void pg_source_rebind_finish(pg_root_binding *saved, int commit)
+{
+	while (saved) {
+		pg_root_binding *next = saved->next;
+		pg_source *source = saved->source;
+
+		if (commit) {
+			if (saved->fd >= 0)
+				close(saved->fd);
+			pg_source_records_free(saved->records);
+		} else {
+			if (source->fd >= 0)
+				close(source->fd);
+			pg_source_records_free(source->records);
+			source->fd = saved->fd;
+			source->records = saved->records;
+			source->identity = saved->identity;
+			source->generation = saved->generation;
+		}
+		free(saved);
+		saved = next;
+	}
+}
+
+extern "C" pg_status pg_source_refresh_name(pg_source *source,
+		const char *name, int recursive, pg_error *error)
+{
+	int native_code = 0;
+	pg_status status = pg_source_loose_scan_private(source, name,
+		&native_code, 1, recursive ? 0 : 2);
+
+	return pg_native_result(status, native_code, error);
 }
 
 static pg_status pg_source_loose_validate_dir(int dir, int *native_code)
@@ -1352,7 +1532,9 @@ pg_status pg_source_release(pg_source *source, int *native_code)
 	pg_source_records_free(source->records);
 	pg_source_requests_free(source->exact_requests);
 	pg_source_requests_free(source->prefix_requests);
+	pg_source_requests_free(source->shallow_requests);
 	free(source->native_path);
+	pg_source_sync_destroy(source);
 	free(source);
 	return closed ? PG_IO : PG_OK;
 }
@@ -1368,8 +1550,6 @@ static pg_status pg_source_hogg_commit(pg_source *source,
 	int native_code = 0;
 	uint32_t op_size;
 
-	if (pg_atomic_load(&source->live_readers))
-		return pg_result(PG_BUSY, error);
 	status = pg_read_span(source->fd,
 		(uint64_t)source->identity.st_size, 0,
 		header, sizeof(header));
@@ -1919,7 +2099,7 @@ pg_status pg_source_pigg_delete(pg_file *file, pg_error *error)
 		(uint32_t)record->info.archive_record, UINT32_MAX, error);
 }
 
-pg_status pg_source_hogg_delete(pg_file *file, pg_error *error)
+static pg_status pg_source_hogg_delete_locked(pg_file *file, pg_error *error)
 {
 	pg_source *source = file->source;
 	pg_source_record *record;
@@ -1937,15 +2117,14 @@ pg_status pg_source_hogg_delete(pg_file *file, pg_error *error)
 		return pg_result(PG_RECOVERY_REQUIRED, error);
 	if (source->format != PG_HOGG10)
 		return pg_result(PG_INVALID, error);
-	if (source->live_writers ||
-	    pg_atomic_load(&source->live_readers))
+	if (source->live_writers)
 		return pg_result(PG_BUSY, error);
 	if (fstat(source->fd, &current) ||
 	    lstat(source->native_path, &path_state)) {
 		native_code = errno;
 		return pg_native_result(PG_IO, native_code, error);
 	}
-	if (!pg_native_stat_same(&file->source_identity, &current) ||
+	if (!pg_native_stat_same(&source->identity, &current) ||
 	    !pg_native_stat_same(&current, &path_state))
 		return pg_result(PG_STALE, error);
 	for (record = source->records; record; record = record->next) {
@@ -2287,6 +2466,7 @@ static pg_status pg_source_hogg_stage(pg_writer *writer,
 	int native_code = 0;
 	pg_status status;
 
+	/* Reject conflicts before appending payload or changing metadata. */
 	if (fstat(source->fd, &current) ||
 	    lstat(source->native_path, &path_state))
 		return pg_native_result(PG_IO, errno, error);
@@ -2447,11 +2627,13 @@ static pg_status pg_source_hogg_stage(pg_writer *writer,
 			return status;
 		return pg_source_hogg_stage(writer, error);
 	}
-	if (fseeko(writer->builder->staging, 0, SEEK_SET))
+	if (!writer->metadata_only &&
+	    fseeko(writer->builder->staging, 0, SEEK_SET))
 		return pg_native_result(PG_IO, errno, error);
-	payload = (uint64_t)current.st_size;
+	payload = writer->metadata_only ? record->payload_offset :
+		(uint64_t)current.st_size;
 	uint8_t bytes[65536];
-	uint64_t remaining = entry->stored_size;
+	uint64_t remaining = writer->metadata_only ? 0 : entry->stored_size;
 
 	while (remaining) {
 		size_t amount = remaining < sizeof(bytes) ?
@@ -2543,10 +2725,12 @@ static pg_status pg_source_hogg_stage(pg_writer *writer,
 		(uint32_t)entry->logical_size : 0);
 	pg_wire_u32(frame + 52, name_id);
 	pg_wire_u32(frame + 56, header_id);
+	source->changed_record = slot;
 	return pg_source_hogg_commit(source, frame, sizeof(frame), error);
 }
 
-pg_status pg_source_archive_finish(pg_writer *writer, pg_error *error)
+static pg_status pg_source_archive_finish_locked(pg_writer *writer,
+		pg_error *error)
 {
 	pg_source *source = writer->source;
 	struct stat current, path_state;
@@ -2589,6 +2773,175 @@ pg_status pg_source_archive_finish(pg_writer *writer, pg_error *error)
 	return pg_result(PG_INVALID, error);
 }
 
+static void pg_source_mutation_refresh(pg_source *source, pg_status status)
+{
+	/* Unpublished writes can change native identity without changing
+	 * copies. */
+	if (status != PG_OK && status != PG_STALE && status != PG_BUSY &&
+	    !source->recovery_required && source->format == PG_HOGG10) {
+		pg_error ignored;
+
+		source->changed_record = UINT64_MAX;
+		pg_source_rescan(source, &ignored);
+	}
+}
+
+pg_status pg_source_hogg_delete(pg_file *file, pg_error *error)
+{
+	pg_source *source = file->source;
+
+	pg_source_lock(source);
+	source->internal_mutation = 1;
+	pg_status status = pg_source_hogg_delete_locked(file, error);
+
+	pg_source_mutation_refresh(source, status);
+	source->internal_mutation = 0;
+	source->changed_record = UINT64_MAX;
+	pg_source_unlock(source);
+	return status;
+}
+
+pg_status pg_source_archive_finish(pg_writer *writer, pg_error *error)
+{
+	pg_source *source = writer->source;
+
+	pg_source_lock(source);
+	source->internal_mutation = 1;
+	pg_status status = pg_source_archive_finish_locked(writer, error);
+
+	pg_source_mutation_refresh(source, status);
+	source->internal_mutation = 0;
+	source->changed_record = UINT64_MAX;
+	pg_source_unlock(source);
+	return status;
+}
+
+static pg_status pg_source_metadata_locked(pg_file *file,
+		const pg_metadata_options *options, pg_error *error)
+{
+	pg_source *source = file->source;
+	pg_source_record *record;
+	struct stat current, path_state;
+	pg_builder_entry entry = {};
+	pg_status status;
+
+	if (source->live_writers)
+		return pg_result(PG_BUSY, error);
+	for (record = source->records; record; record = record->next)
+		if (record->info.copy_id == file->info.copy_id &&
+		    record->info.copy_generation == file->info.copy_generation)
+			break;
+	if (!record)
+		return pg_result(PG_STALE, error);
+	if (fstat(source->fd, &current) ||
+	    lstat(source->native_path, &path_state))
+		return pg_native_result(PG_IO, errno, error);
+	if (!pg_native_stat_same(&source->identity, &current) ||
+	    !pg_native_stat_same(&current, &path_state))
+		return pg_result(PG_STALE, error);
+	entry.canonical_name = (char *)record->info.canonical_name;
+	entry.original_name = (char *)record->info.original_name;
+	entry.cached_header = (void *)record->info.cached_header;
+	entry.cached_header_size = record->info.cached_header_size;
+	entry.mtime = record->info.mtime;
+	if (options->fields & PG_METADATA_MTIME)
+		entry.mtime = options->mtime;
+	if ((source->format == PG_HOGG10 &&
+	     (entry.mtime < INT32_MIN || entry.mtime > INT32_MAX)) ||
+	    (source->format == PG_PIGG2 &&
+	     (entry.mtime < 0 || entry.mtime > UINT32_MAX)))
+		return pg_result(PG_LIMIT, error);
+	if (options->fields & PG_METADATA_HEADER) {
+		entry.cached_header = (void *)options->cached_header;
+		entry.cached_header_size = options->cached_header_size;
+	}
+	if (entry.mtime == record->info.mtime &&
+	    entry.cached_header_size == record->info.cached_header_size &&
+	    (!entry.cached_header_size || !memcmp(entry.cached_header,
+		record->info.cached_header, entry.cached_header_size)))
+		return pg_result(PG_OK, error);
+	entry.logical_size = record->info.logical_size;
+	entry.stored_size = record->info.stored_size;
+	entry.encoding = record->info.encoding;
+	entry.stage_offset = record->payload_offset;
+	memcpy(entry.digest, record->info.digest, sizeof(entry.digest));
+	if (source->format == PG_PIGG2) {
+		int fd = dup(source->fd);
+		FILE *staging;
+
+		if (fd < 0)
+			return pg_native_result(PG_IO, errno, error);
+		staging = fdopen(fd, "rb");
+		if (!staging) {
+			int code = errno;
+
+			close(fd);
+			return pg_native_result(PG_IO, code, error);
+		}
+		status = pg_source_pigg_clone(source, &entry, staging,
+			UINT32_MAX, (uint32_t)record->info.archive_record,
+				error);
+		if (fclose(staging) && status == PG_OK) {
+			pg_native_result(PG_COMMITTED, errno, error);
+			if (error)
+				error->cause = PG_IO;
+			status = PG_COMMITTED;
+		}
+		return status;
+	}
+	if (!(options->fields & PG_METADATA_HEADER)) {
+		uint8_t header[24], disk[32], frame[56] = {};
+		uint32_t slot = (uint32_t)record->info.archive_record;
+
+		status = pg_read_span(source->fd, current.st_size, 0,
+			header, sizeof(header));
+		if (status != PG_OK)
+			return pg_result(status, error);
+		uint64_t table = 24 + pg_read_u16(header + 6) +
+			pg_read_u16(header + 20);
+
+		status = pg_read_span(source->fd, current.st_size,
+			table + 32 * (uint64_t)slot, disk, sizeof(disk));
+		if (status != PG_OK)
+			return pg_result(status, error);
+		pg_wire_u32(frame, 3);
+		pg_wire_u32(frame + 8, slot);
+		memcpy(frame + 12, disk + 8, 4);
+		pg_wire_u32(frame + 16, (uint32_t)entry.mtime);
+		memcpy(frame + 24, disk + 24, 8);
+		memcpy(frame + 32, disk + 16, 4);
+		memcpy(frame + 40, disk, 8);
+		source->changed_record = slot;
+		return pg_source_hogg_commit(source, frame, sizeof(frame),
+			error);
+	}
+	pg_archive_builder builder = {};
+	pg_writer writer = {};
+
+	builder.entries = &entry;
+	writer.builder = &builder;
+	writer.source = source;
+	writer.target_copy_id = record->info.copy_id;
+	writer.metadata_only = 1;
+	return pg_source_hogg_stage(&writer, error);
+}
+
+pg_status pg_source_update_metadata(pg_file *file,
+		const pg_metadata_options *options, pg_error *error)
+{
+	pg_source *source = file->source;
+
+	pg_source_lock(source);
+	source->internal_mutation = 1;
+	pg_status status = pg_source_metadata_locked(file, options, error);
+
+	pg_source_mutation_refresh(source, status);
+	source->internal_mutation = 0;
+	source->changed_record = UINT64_MAX;
+	pg_source_unlock(source);
+	return status;
+}
+
 extern "C" {
 
 /* Validate options and resolve native identity. */
@@ -2601,7 +2954,7 @@ PG_API pg_status PG_CALL pg_source_open(
 		pg_source **out,
 		pg_error *error)
 {
-	pg_source_options defaults = { PG_AUTO, PG_READ };
+	pg_source_options defaults = { PG_AUTO, PG_READ, PG_CHECKSUM_LOGICAL };
 	const pg_source_options *chosen = options ? options : &defaults;
 	pg_source *source;
 	pg_source *other;
@@ -2617,7 +2970,8 @@ PG_API pg_status PG_CALL pg_source_open(
 		return pg_result(PG_INVALID, error);
 	*out = NULL;
 	if (!context || !native_path || !*native_path ||
-	    chosen->format > PG_LOOSE || chosen->access > PG_WRITE)
+	    chosen->format > PG_LOOSE || chosen->access > PG_WRITE ||
+	    chosen->checksum_domain > PG_CHECKSUM_STORED)
 		return pg_result(PG_INVALID, error);
 	if (lstat(native_path, &before)) {
 		native_code = errno;
@@ -2678,7 +3032,8 @@ PG_API pg_status PG_CALL pg_source_open(
 		else
 			format = PG_AUTO;
 	}
-	if (format == PG_AUTO ||
+	if ((chosen->checksum_domain == PG_CHECKSUM_STORED &&
+	     format != PG_HOGG10) || format == PG_AUTO ||
 	    (chosen->format != PG_AUTO && chosen->format != format)) {
 		close(fd);
 		return pg_result(PG_UNSUPPORTED, error);
@@ -2698,7 +3053,19 @@ PG_API pg_status PG_CALL pg_source_open(
 	source->identity = opened;
 	source->format = format;
 	source->access = chosen->access;
+	source->checksum_domain = chosen->checksum_domain;
 	source->generation = 1;
+	source->changed_record = UINT64_MAX;
+	if (format == PG_HOGG10) {
+		status = pg_source_sync_create(source);
+		if (status != PG_OK)
+			goto cleanup;
+		if (source->access == PG_WRITE) {
+			status = pg_native_writer_lease(fd, &native_code);
+			if (status != PG_OK)
+				goto cleanup;
+		}
+	}
 	source->native_path = pg_native_absolute(native_path, &status,
 		&native_code);
 	if (!source->native_path)
@@ -2750,6 +3117,7 @@ cleanup:
 	close(source->fd);
 	pg_source_records_free(source->records);
 	free(source->native_path);
+	pg_source_sync_destroy(source);
 	free(source);
 	return pg_native_result(status, native_code, error);
 }
@@ -2768,6 +3136,7 @@ PG_API pg_status PG_CALL pg_source_inspect(pg_source *source,
 	out->native_path = source->native_path;
 	out->format = source->format;
 	out->access = source->access;
+	out->checksum_domain = source->checksum_domain;
 	return pg_result(PG_OK, error);
 }
 
@@ -2990,6 +3359,8 @@ PG_API pg_status PG_CALL pg_source_copy(
 			digest_size) != 0) {
 			options.entry.digest_kind =
 				input->info.digest_kind;
+			options.entry.expected_digest_domain =
+				input->info.checksum_domain;
 			memcpy(options.entry.expected_digest,
 				input->info.digest, digest_size);
 		}
@@ -3037,15 +3408,19 @@ PG_API pg_status PG_CALL pg_source_pack(
 		const pg_pack_options *options,
 		pg_error *error)
 {
-	pg_pack_options defaults = { PG_COMPRESS_AUTO, 0 };
+	pg_pack_options defaults = { PG_COMPRESS_AUTO, 0, PG_CHECKSUM_LOGICAL };
 	const pg_pack_options *chosen = options ? options : &defaults;
 	pg_cursor *cursor = NULL;
 
 	if (!source || !native_archive || !*native_archive ||
 	    (format != PG_PIGG2 && format != PG_HOGG10) ||
 	    chosen->compression > PG_COMPRESS_FORCE ||
+	    chosen->checksum_domain > PG_CHECKSUM_STORED ||
 	    (chosen->flags & ~PG_OVERWRITE))
 		return pg_result(PG_INVALID, error);
+	if (chosen->checksum_domain == PG_CHECKSUM_STORED &&
+	    format != PG_HOGG10)
+		return pg_result(PG_UNSUPPORTED, error);
 	pg_status status = pg_source_request_subtree(source, NULL, error);
 
 	if (status != PG_OK)
@@ -3099,7 +3474,7 @@ PG_API pg_status PG_CALL pg_source_unpack(
 /* Normalize exact name and probe requested loose path. */
 /* Resolve indexed archive copies and capture visible winner. */
 /* Return a retained selection; unwind on failure. */
-static pg_status pg_source_select(pg_source *source,
+pg_status pg_source_select(pg_source *source,
 		pg_source_record *selected, pg_file **out, pg_error *error)
 {
 	pg_file *file = (pg_file *)calloc(1, sizeof(*file));
@@ -3142,6 +3517,7 @@ static pg_status pg_source_select(pg_source *source,
 		return pg_result(status, error);
 	}
 	file->source = source;
+	file->attributes = selected->attributes;
 	file->payload_offset = selected->payload_offset;
 	file->source_identity = selected->native_path ?
 		selected->identity : source->identity;
@@ -3171,6 +3547,8 @@ static pg_status pg_source_find_mode(
 		return pg_result(PG_INVALID, error);
 	if (source->stale)
 		return pg_result(PG_STALE, error);
+	if (source->format == PG_LOOSE && source->fd < 0)
+		return pg_result(PG_NOT_FOUND, error);
 	status = pg_source_control_status(source, 0);
 	if (status != PG_OK)
 		return pg_result(status, error);
@@ -3229,6 +3607,10 @@ static pg_status pg_source_find_mode(
 	free(canonical);
 	if (!selected)
 		return pg_result(PG_NOT_FOUND, error);
+	if (S_ISDIR(selected->identity.st_mode)) {
+		pg_source_records_free(transient);
+		return pg_result(PG_CONFLICT, error);
+	}
 	status = pg_source_select(source, selected, out, error);
 	pg_source_records_free(transient);
 	return status;
@@ -3269,6 +3651,9 @@ pg_status pg_source_name_kind(pg_source *source, const char *name)
 		const char *candidate = record->info.canonical_name;
 
 		if (!pg_descendant_order(candidate, name))
+			return PG_CONFLICT;
+		if (!strcmp(candidate, name) &&
+			S_ISDIR(record->identity.st_mode))
 			return PG_CONFLICT;
 		if (!strcmp(candidate, name))
 			status = PG_OK;
@@ -3311,15 +3696,18 @@ static int pg_source_items_directory(pg_source_record **items, size_t count,
 	return 0;
 }
 
-static pg_status pg_source_request_subtree_mode(pg_source *source,
-		const char *prefix, pg_error *error, int tree_request)
+static pg_status pg_source_discover_mode(pg_source *source,
+		const char *prefix, uint32_t depth, pg_error *error,
+		int tree_request)
 {
 	char *canonical = NULL;
 	size_t required = 0;
 	pg_status status;
 	int native_code = 0;
+	pg_source_request *added = NULL;
+	pg_source_request **requests;
 
-	if (!source)
+	if (!source || depth > PG_DISCOVER_RECURSIVE)
 		return pg_result(PG_INVALID, error);
 	if (source->stale)
 		return pg_result(PG_STALE, error);
@@ -3327,67 +3715,83 @@ static pg_status pg_source_request_subtree_mode(pg_source *source,
 	if (status != PG_OK)
 		return pg_result(status, error);
 	if (prefix && *prefix) {
-		status = pg_name_normalize(source->context, prefix,
-			NULL, 0, &required, NULL);
+		status = pg_name_normalize(source->context, prefix, NULL, 0,
+			&required, NULL);
 		if (status != PG_CAPACITY)
 			return pg_result(status, error);
 		canonical = (char *)malloc(required);
 		if (!canonical)
 			return pg_result(PG_NOMEM, error);
-		status = pg_name_normalize(source->context, prefix,
-			canonical, required, &required, NULL);
-		if (status != PG_OK) {
-			free(canonical);
-			return pg_result(status, error);
-		}
+		status = pg_name_normalize(source->context, prefix, canonical,
+			required, &required, NULL);
 	}
+	requests = depth == PG_DISCOVER_CHILDREN ?
+		&source->shallow_requests : &source->prefix_requests;
 	if (source->format == PG_LOOSE) {
-		pg_source_request *added = NULL;
+		pg_source_request *before = *requests;
 
-		if (canonical &&
-		    !pg_source_request_covered(source, canonical)) {
-			status = pg_source_request_add(
-				&source->prefix_requests, canonical);
-			if (status != PG_OK) {
-				free(canonical);
-				return pg_result(status, error);
-			}
-			added = source->prefix_requests;
-		}
-		status = pg_source_loose_scan_private(source, canonical,
-			&native_code, tree_request);
+		if (canonical || depth == PG_DISCOVER_CHILDREN)
+			status = pg_source_request_add(requests,
+				canonical ? canonical : "");
+		if (status == PG_OK && before != *requests)
+			added = *requests;
+		if (status == PG_OK)
+			status = pg_source_loose_scan_private(source, canonical,
+				&native_code, tree_request,
+				depth == PG_DISCOVER_CHILDREN);
 		if (status != PG_OK && added) {
-			source->prefix_requests = added->next;
+			*requests = added->next;
 			added->next = NULL;
 			pg_source_requests_free(added);
 		}
-		if (status == PG_OK && !canonical)
+		if (status == PG_OK && !canonical &&
+		    depth == PG_DISCOVER_RECURSIVE)
 			source->loose_root_requested = 1;
-	}
-	if (status == PG_OK && canonical && !tree_request &&
-	    source->format != PG_LOOSE) {
-		if (pg_source_name_kind(source, canonical) == PG_OK)
-			status = PG_CONFLICT;
+	} else if (canonical && !tree_request &&
+		   pg_source_name_kind(source, canonical) == PG_OK) {
+		status = PG_CONFLICT;
 	}
 	free(canonical);
 	return pg_native_result(status, native_code, error);
 }
 
+pg_status pg_source_discover(pg_source *source, const char *prefix,
+		uint32_t depth, pg_error *error)
+{
+	return pg_source_discover_mode(source, prefix, depth, error, 0);
+}
+
+pg_status pg_source_discover_tree(pg_source *source, const char *prefix,
+		uint32_t depth, pg_error *error)
+{
+	return pg_source_discover_mode(source, prefix, depth, error, 1);
+}
+
 PG_API pg_status PG_CALL pg_source_request_subtree(pg_source *source,
 		const char *prefix, pg_error *error)
 {
-	return pg_source_request_subtree_mode(source, prefix, error, 0);
+	return pg_source_discover(source, prefix, PG_DISCOVER_RECURSIVE, error);
 }
 
 pg_status pg_source_request_tree_subtree(pg_source *source,
 		const char *prefix, pg_error *error)
 {
-	return pg_source_request_subtree_mode(source, prefix, error, 1);
+	return pg_source_discover_tree(source, prefix,
+		PG_DISCOVER_RECURSIVE, error);
+}
+
+static int pg_source_children_covered(pg_source *source, const char *prefix)
+{
+	for (pg_source_request *r = source->shallow_requests; r; r = r->next) {
+		if (!strcmp(r->name, prefix ? prefix : ""))
+			return 1;
+	}
+	return 0;
 }
 
 /* Capture visible source files in canonical order without native probes. */
-PG_API pg_status PG_CALL pg_source_files(pg_source *source,
-		const char *prefix, pg_cursor **out, pg_error *error)
+pg_status pg_source_files_depth(pg_source *source, const char *prefix,
+		int recursive, pg_cursor **out, pg_error *error)
 {
 	pg_source_record **items = NULL;
 	pg_source_record *record;
@@ -3420,7 +3824,8 @@ PG_API pg_status PG_CALL pg_source_files(pg_source *source,
 			goto fail_early;
 	}
 	if (source->format == PG_LOOSE &&
-	    !pg_source_request_covered(source, canonical)) {
+	    !pg_source_request_covered(source, canonical) &&
+	    (recursive || !pg_source_children_covered(source, canonical))) {
 		status = PG_INVALID;
 		goto fail_early;
 	}
@@ -3480,7 +3885,9 @@ PG_API pg_status PG_CALL pg_source_files(pg_source *source,
 			selected = items[next];
 			next++;
 		}
-		if (!pg_source_items_directory(items, count, name)) {
+		if (pg_name_in_scope(name, canonical, recursive) &&
+		    !S_ISDIR(selected->identity.st_mode) &&
+		    !pg_source_items_directory(items, count, name)) {
 			status = pg_source_select(source, selected,
 				&cursor->files[cursor->count], error);
 			if (status != PG_OK)
@@ -3503,9 +3910,15 @@ fail_early:
 }
 
 /* Refresh indexed archives without changing retained selections on failure. */
-PG_API pg_status PG_CALL pg_source_rescan(
+PG_API pg_status PG_CALL pg_source_files(pg_source *source,
+		const char *prefix, pg_cursor **out, pg_error *error)
+{
+	return pg_source_files_depth(source, prefix, 1, out, error);
+}
+
+static pg_status pg_source_rescan_locked(
 		pg_source *source,
-		pg_error *error)
+		pg_error *error, int invalidate = 0)
 {
 	pg_source probe;
 	pg_source_record *record;
@@ -3525,6 +3938,11 @@ PG_API pg_status PG_CALL pg_source_rescan(
 	status = pg_source_control_status(source, 1);
 	if (status != PG_OK)
 		return pg_result(status, error);
+	if (source->format == PG_LOOSE && source->fd < 0) {
+		pg_source_records_free(source->records);
+		source->records = NULL;
+		return pg_result(PG_OK, error);
+	}
 	if (source->format == PG_LOOSE) {
 		pg_source_request *request;
 		pg_source_record **items = NULL;
@@ -3543,6 +3961,15 @@ PG_API pg_status PG_CALL pg_source_rescan(
 				status = pg_source_loose_scan(&probe,
 					source->fd, "", request->name,
 					&native_code);
+			probe.scan_shallow = 1;
+			for (request = source->shallow_requests;
+			     request && status == PG_OK; request =
+				request->next)
+				status = pg_source_loose_scan(&probe,
+					source->fd, "",
+					*request->name ? request->name : NULL,
+					&native_code);
+			probe.scan_shallow = 2;
 			for (request = source->exact_requests;
 			     request && status == PG_OK;
 			     request = request->next)
@@ -3626,7 +4053,7 @@ PG_API pg_status PG_CALL pg_source_rescan(
 	}
 	next_id = source->context->next_id;
 	generation = source->generation;
-	if (!pg_native_stat_same(&source->identity, &current)) {
+	if (invalidate || !pg_native_stat_same(&source->identity, &current)) {
 		if (generation == UINT64_MAX) {
 			pg_source_records_free(probe.records);
 			return pg_result(PG_LIMIT, error);
@@ -3640,7 +4067,10 @@ PG_API pg_status PG_CALL pg_source_rescan(
 		record->info.source_id = source->id;
 		record->info.source_generation = generation;
 		for (old = source->records; old; old = old->next) {
-			if (old->payload_offset == record->payload_offset &&
+			if ((source->internal_mutation ?
+			     old->info.archive_record ==
+				record->info.archive_record :
+			     old->payload_offset == record->payload_offset) &&
 			    strcmp(old->info.canonical_name,
 				a->canonical_name) == 0 &&
 			    strcmp(old->info.original_name,
@@ -3657,7 +4087,10 @@ PG_API pg_status PG_CALL pg_source_rescan(
 		b = &old->info;
 		record->info.copy_id = b->copy_id;
 		record->info.copy_generation = b->copy_generation;
-		if (!pg_native_stat_same(&source->identity, &current) ||
+		if (invalidate || (!source->internal_mutation &&
+		     !pg_native_stat_same(&source->identity, &current)) ||
+		    (source->internal_mutation && a->archive_record ==
+		     source->changed_record) ||
 		    a->logical_size != b->logical_size ||
 		    a->stored_size != b->stored_size ||
 		    a->mtime != b->mtime ||
@@ -3685,7 +4118,7 @@ limit:
 
 /* Validate every physical record, structure and payload. */
 /* Return precise corruption, checksum or native failure status. */
-PG_API pg_status PG_CALL pg_source_validate(
+static pg_status pg_source_validate_locked(
 		pg_source *source,
 		pg_error *error)
 {
@@ -3766,6 +4199,9 @@ PG_API pg_status PG_CALL pg_source_validate(
 			info.logical_size = info.stored_size;
 			info.encoding = PG_LOGICAL;
 			info.digest_kind = PG_DIGEST_MD5_32;
+			info.checksum_domain = i == pg_read_u32(header + 16) ?
+				(uint32_t)PG_CHECKSUM_LOGICAL :
+				source->checksum_domain;
 			memcpy(info.digest, disk + 16, 4);
 			if (pg_read_u16(disk + 24) == 0xfffe) {
 				ea_id = pg_read_u32(disk + 28);
@@ -3865,9 +4301,16 @@ PG_API pg_status PG_CALL pg_source_recover(
 		    source->identity.st_ino == opened.st_ino)
 			break;
 	}
-	if (source && pg_atomic_load(&source->live_readers)) {
+	if (source)
+		pg_source_lock(source);
+	if (source && !source->internal_mutation && source->live_writers) {
 		status = PG_BUSY;
 		goto cleanup_recover;
+	}
+	if (!source || source->access != PG_WRITE) {
+		status = pg_native_writer_lease(fd, &native_code);
+		if (status != PG_OK)
+			goto cleanup_recover;
 	}
 	file_size = (uint64_t)opened.st_size;
 	status = pg_read_span(fd, file_size, 0, header, sizeof(header));
@@ -4148,7 +4591,8 @@ cleanup_recover:
 			status = PG_IO;
 		} else {
 			source->recovery_required = 0;
-			status = pg_source_rescan(source, NULL);
+			status = pg_source_rescan_locked(source, NULL,
+				!source->internal_mutation);
 			source->recovery_required = 1;
 		}
 	}
@@ -4168,6 +4612,7 @@ cleanup_recover:
 	if ((status == PG_RECOVERY_REQUIRED ||
 	     status == PG_COMMITTED) && error)
 		error->cause = cause;
+	pg_source_unlock(source);
 	return status;
 }
 
@@ -4288,3 +4733,21 @@ PG_API pg_status PG_CALL pg_source_close(
 }
 
 } /* extern "C" */
+
+pg_status pg_source_rescan(pg_source *source, pg_error *error)
+{
+	pg_source_lock(source);
+	pg_status status = pg_source_rescan_locked(source, error);
+
+	pg_source_unlock(source);
+	return status;
+}
+
+pg_status pg_source_validate(pg_source *source, pg_error *error)
+{
+	pg_source_lock(source);
+	pg_status status = pg_source_validate_locked(source, error);
+
+	pg_source_unlock(source);
+	return status;
+}

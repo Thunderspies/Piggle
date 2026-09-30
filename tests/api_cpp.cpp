@@ -4,6 +4,7 @@
 	static_assert(&piggle::name == &::name, #name " must import the C API")
 
 CHECK_IMPORT(pg_archive_builder_create);
+CHECK_IMPORT(pg_archive_builder_create_options);
 CHECK_IMPORT(pg_archive_builder_write_all);
 CHECK_IMPORT(pg_archive_builder_import);
 CHECK_IMPORT(pg_archive_builder_copy);
@@ -19,6 +20,9 @@ CHECK_IMPORT(pg_buffer_free);
 CHECK_IMPORT(pg_file_read_all);
 CHECK_IMPORT(pg_file_read_all_alloc);
 CHECK_IMPORT(pg_file_write_all);
+CHECK_IMPORT(pg_tree_manage);
+CHECK_IMPORT(pg_tree_unmanage);
+CHECK_IMPORT(pg_file_update_metadata);
 CHECK_IMPORT(pg_file_export);
 CHECK_IMPORT(pg_file_inspect);
 CHECK_IMPORT(pg_cursor_next);
@@ -31,6 +35,14 @@ CHECK_IMPORT(pg_reader_open_tree);
 CHECK_IMPORT(pg_reader_open);
 CHECK_IMPORT(pg_reader_open_native);
 CHECK_IMPORT(pg_reader_inspect);
+CHECK_IMPORT(pg_reader_seek);
+CHECK_IMPORT(pg_reader_tell);
+CHECK_IMPORT(pg_source_discover);
+CHECK_IMPORT(pg_tree_discover);
+CHECK_IMPORT(pg_source_entries);
+CHECK_IMPORT(pg_tree_entries);
+CHECK_IMPORT(pg_entry_cursor_next);
+CHECK_IMPORT(pg_entry_cursor_close);
 CHECK_IMPORT(pg_reader_read);
 CHECK_IMPORT(pg_reader_close);
 CHECK_IMPORT(pg_writer_open_source);

@@ -94,6 +94,7 @@ static inline void pg_context_child_drop(pg_context *context)
 
 struct pg_source_record {
 	pg_source_record *next;
+	uint32_t attributes;
 	pg_file_info info;
 	uint64_t payload_offset;
 	char *native_path;
@@ -109,6 +110,35 @@ static inline int pg_descendant_order(const char *name, const char *prefix)
 	return order ? order : (unsigned char)name[length] - '/';
 }
 
+/* A shallow scope includes the prefix itself and its immediate children. */
+static inline int pg_name_in_scope(const char *name, const char *prefix,
+		int recursive)
+{
+	const char *relative = name;
+
+	if (prefix && *prefix) {
+		size_t length = strlen(prefix);
+
+		if (strncmp(name, prefix, length))
+			return 0;
+		if (!name[length])
+			return 1;
+		if (name[length] != '/')
+			return 0;
+		relative += length + 1;
+	}
+	return recursive || !strchr(relative, '/');
+}
+
+extern "C" pg_status pg_source_files_depth(pg_source *source,
+	const char *prefix,
+		int recursive, pg_cursor **out, pg_error *error);
+extern "C" pg_status pg_tree_files_depth(pg_tree *tree, const char *prefix,
+		int recursive, pg_cursor **out, pg_error *error);
+extern "C" pg_status pg_source_discover_tree(pg_source *source,
+	const char *prefix,
+		uint32_t depth, pg_error *error);
+
 extern "C" pg_status pg_source_name_kind(pg_source *source, const char *name);
 extern "C" pg_status pg_source_writer_name_check(pg_source *source,
 		const char *name);
@@ -120,13 +150,19 @@ struct pg_source_request {
 	char *name;
 };
 
+struct pg_source_sync;
+
 struct pg_source {
+	pg_source_sync *sync;
+	int internal_mutation;
+	uint64_t changed_record;
 	pg_context *context;
 	pg_source *next_in_context;
 	char *native_path;
 	pg_source_record *records;
 	pg_source_request *exact_requests;
 	pg_source_request *prefix_requests;
+	pg_source_request *shallow_requests;
 	struct stat identity;
 	pg_id id;
 	uint64_t generation;
@@ -135,10 +171,12 @@ struct pg_source {
 	size_t live_writers;
 	uint32_t format;
 	uint32_t access;
+	uint32_t checksum_domain;
 	int fd;
 	int stale;
 	int recovery_required;
 	int loose_root_requested;
+	int scan_shallow;
 	int watch_wd;
 #ifdef _WIN32
 	HANDLE native_watch;
@@ -150,20 +188,62 @@ struct pg_source {
 	struct pg_tree *attached;
 };
 
+pg_status pg_source_sync_create(pg_source *source);
+void pg_source_sync_destroy(pg_source *source);
+void pg_source_lock(pg_source *source);
+void pg_source_unlock(pg_source *source);
+pg_status pg_native_writer_lease(int fd, int *native_code);
+pg_status pg_native_target_lease(const char *path, int exists, int *out,
+		int *native_code);
+
 struct pg_tree_source_state {
 	pg_source_record *records;
 	pg_source_request *exact_requests;
 	pg_source_request *prefix_requests;
+	pg_source_request *shallow_requests;
 	struct stat identity;
 	uint64_t generation;
 	int loose_root_requested;
 	int captured;
 };
 
+struct pg_root_binding {
+	pg_root_binding *next;
+	pg_source *source;
+	pg_source_record *records;
+	struct stat identity;
+	uint64_t generation;
+	int fd;
+};
+
+struct pg_managed_scope {
+	pg_managed_scope *next;
+	char *prefix;
+	uint32_t depth;
+};
+
+struct pg_native_hint {
+	pg_native_hint *next;
+	pg_source *source;
+	char *name;
+	int subtree;
+	int processed;
+};
+
+struct pg_native_watch {
+	pg_native_watch *next;
+	pg_source *source;
+	char *relative;
+	int wd;
+};
+
 struct pg_tree {
 	pg_context *context;
 	pg_source **sources;
 	struct pg_tree_scope *scopes;
+	pg_managed_scope *managed;
+	pg_native_hint *hints;
+	pg_native_watch *watches;
 	struct pg_tree_batch *pending_head;
 	struct pg_tree_batch *pending_tail;
 	size_t count;
@@ -175,6 +255,8 @@ struct pg_tree {
 	int loss_reported;
 	int loss_pending;
 	int native_dirty;
+	const char *query_name;
+	int partial_changes;
 	int native_repair;
 	int native_fd;
 	size_t refs;
@@ -190,6 +272,8 @@ struct pg_tree {
 
 struct pg_tree_batch {
 	pg_tree_batch *next;
+	char *invalid_name;
+	char *invalid_scope;
 	pg_cursor *before;
 	pg_cursor *after;
 	pg_cursor *replacement;
@@ -204,6 +288,9 @@ struct pg_tree_scope {
 	pg_cursor *baseline;
 	size_t reader_refs;
 	int exact;
+	int shallow;
+	int managed;
+	int dirty;
 };
 
 pg_status pg_tree_retain(pg_tree *tree);
@@ -216,6 +303,7 @@ pg_status pg_source_control_status(const pg_source *source, int mutation);
 
 struct pg_file {
 	pg_source *source;
+	uint32_t attributes;
 	pg_tree *origin_tree;
 	pg_file_info info;
 	uint64_t payload_offset;
@@ -230,6 +318,11 @@ struct pg_cursor {
 	size_t count;
 	size_t position;
 };
+
+pg_status pg_indexed_directories(pg_source **sources, size_t count,
+		const char ***out, size_t *size);
+int pg_directory_names_contain(const char **names, size_t count,
+		const char *name);
 
 struct pg_unpack_item {
 	pg_source *source;
@@ -285,8 +378,28 @@ extern "C" pg_status pg_tree_scope_snapshot(pg_tree *tree,
 extern "C" pg_status pg_tree_cursor_clone(pg_cursor *source,
 		pg_cursor **out);
 pg_status pg_tree_queue_changes(pg_tree *tree, pg_error *error);
+pg_status pg_tree_queue_topology(pg_tree *tree, pg_error *error);
 extern "C" pg_status pg_source_find_fresh(pg_source *source, const char *name,
 		pg_file **out, pg_error *error);
+int pg_tree_manages(pg_tree *tree, const char *name);
+pg_status pg_tree_observe_name(pg_tree *tree, const char *name,
+		pg_error *error);
+pg_status pg_tree_manage_scan(pg_tree *tree, pg_error *error);
+void pg_tree_manage_discard(pg_tree *tree);
+pg_status pg_tree_hint_add(pg_tree *tree, pg_source *source,
+		const char *name, int subtree);
+void pg_tree_hint_discard(pg_tree *tree, pg_source *source);
+pg_status pg_tree_hints_reconcile(pg_tree *tree, pg_error *error);
+pg_status pg_tree_invalidate_managed(pg_tree *tree);
+pg_status pg_tree_entry_snapshot(pg_tree *tree, pg_tree_scope *scope,
+		pg_cursor **out, pg_error *error);
+extern "C" pg_status pg_source_rebind_root(pg_source *source,
+		int *changed, pg_root_binding **saved, pg_error *error);
+extern "C" void pg_source_rebind_finish(pg_root_binding *saved, int commit);
+extern "C" pg_status pg_source_select(pg_source *source,
+		pg_source_record *selected, pg_file **out, pg_error *error);
+extern "C" pg_status pg_source_refresh_name(pg_source *source,
+		const char *name, int recursive, pg_error *error);
 pg_status pg_tree_native_reconcile(pg_tree *tree, pg_error *error);
 void pg_tree_pending_discard(pg_tree *tree);
 extern "C" pg_status pg_tree_sources_save(pg_tree *tree,
@@ -322,6 +435,7 @@ struct pg_archive_builder {
 	struct stat target;
 	uint32_t format;
 	uint32_t flags;
+	uint32_t checksum_domain;
 	size_t live_writers;
 	int target_exists;
 	int finished;
@@ -354,6 +468,7 @@ struct pg_writer {
 	uint64_t target_copy_generation;
 	uint64_t target_record;
 	int named_target;
+	int metadata_only;
 	uint32_t flags;
 	int target_exists;
 	char *canonical_name;
@@ -383,6 +498,9 @@ pg_status pg_unpack_cursor(pg_cursor *cursor, pg_context *context,
 pg_status pg_source_hogg_delete(pg_file *file, pg_error *error);
 pg_status pg_source_pigg_delete(pg_file *file, pg_error *error);
 pg_status pg_source_archive_finish(pg_writer *writer, pg_error *error);
+struct pg_metadata_options;
+pg_status pg_source_update_metadata(pg_file *file,
+		const pg_metadata_options *options, pg_error *error);
 
 pg_status pg_tree_native_add_source(pg_tree *tree, pg_source *source,
 		int *native_code);

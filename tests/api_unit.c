@@ -661,7 +661,8 @@ static int test_builder(void)
 			sizeof(flush));
 		CHECK(fclose(stream) == 0);
 	}
-	STATUS(pg_source_recover(context, "test.hogg", &error), PG_BUSY);
+	STATUS(pg_source_recover(context, "test.hogg", &error), PG_OK);
+	STATUS(pg_reader_seek(reader, 0, &error), PG_STALE);
 
 	STATUS(pg_reader_close(&reader, &error), PG_OK);
 	STATUS(pg_file_close(&file, &error), PG_OK);
