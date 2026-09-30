@@ -1,0 +1,47 @@
+name: Build and test
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions: {contents: read}
+
+# Flow mappings avoid space indentation, as required by CONTRIBUTING.md.
+jobs: {
+linux: {
+name: Linux GCC (Release),
+runs-on: ubuntu-24.04,
+env: {CC: gcc, CXX: g++},
+steps: [
+{name: Check out sources, uses: actions/checkout@v7},
+{
+name: Configure,
+run: 'cmake -S . -B build -G "Unix Makefiles"
+-DCMAKE_BUILD_TYPE=Release'
+},
+{name: Build, run: 'cmake --build build --parallel'},
+{
+name: Test,
+run: 'ctest --test-dir build --output-on-failure --no-tests=error'
+}
+]
+},
+
+windows: {
+name: Windows MSBuild (Release),
+runs-on: windows-2025-vs2026,
+steps: [
+{name: Check out sources, uses: actions/checkout@v7},
+{
+name: Configure,
+run: 'cmake -S . -B build -G "Visual Studio 18 2026" -A x64'
+},
+{
+name: Build with MSBuild,
+run: 'cmake --build build --config Release --parallel'
+},
+{
+name: Test,
+run: 'ctest --test-dir build -C Release --output-on-failure --no-tests=error'
+}
+]
+}
+}
