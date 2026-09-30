@@ -12,6 +12,29 @@ include(cmake/runtime-foundation.cmake)
 if(MSVC)
 	add_compile_definitions(_CRT_SECURE_NO_WARNINGS
 		_CRT_NONSTDC_NO_WARNINGS)
+	add_compile_options(/WX)
+	add_link_options(/WX)
+else()
+	add_compile_options(-Werror)
+	add_link_options(-Werror)
+	if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR MINGW)
+		add_link_options(LINKER:--fatal-warnings)
+	elseif(APPLE)
+		add_link_options(LINKER:-fatal_warnings)
+	endif()
+endif()
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT piggle_ipo_supported
+	OUTPUT piggle_ipo_error LANGUAGES C CXX)
+if(NOT piggle_ipo_supported)
+	message(STATUS "Release IPO unavailable: ${piggle_ipo_error}")
+endif()
+
+if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR MINGW) AND NOT MSVC)
+	add_compile_options($<$<CONFIG:Release>:-ffunction-sections>
+		$<$<CONFIG:Release>:-fdata-sections>)
+	add_link_options($<$<CONFIG:Release>:LINKER:--gc-sections>)
 endif()
 add_library(piggle
 	src/api.cpp
@@ -24,6 +47,16 @@ add_library(piggle
 	src/tree.cpp
 	src/types.cpp
 )
+if(piggle_ipo_supported)
+	set_property(TARGET piggle PROPERTY
+		INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND
+		NOT BUILD_SHARED_LIBS AND NOT MSVC)
+		list(GET CMAKE_CXX_COMPILE_OPTIONS_IPO 0 piggle_ipo_link_flag)
+		target_link_options(piggle INTERFACE
+			"$<$<CONFIG:Release>:${piggle_ipo_link_flag}>")
+	endif()
+endif()
 add_library(piggle::piggle ALIAS piggle)
 piggle_configure_runtime(piggle)
 target_include_directories(piggle PUBLIC

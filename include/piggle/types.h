@@ -11,7 +11,7 @@
 #else
 #define PG_API __declspec(dllimport)
 #endif
-#elif defined(__GNUC__) || defined(__clang__)
+#elif !defined(_WIN32) && (defined(__GNUC__) || defined(__clang__))
 #define PG_API __attribute__((visibility("default")))
 #else
 #define PG_API

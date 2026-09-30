@@ -32,9 +32,12 @@ function(piggle_configure_runtime target)
 	target_compile_features(${target} PUBLIC c_std_11 cxx_std_11)
 	set_target_properties(${target} PROPERTIES
 		CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES
-		CXX_EXTENSIONS OFF
-		CXX_VISIBILITY_PRESET hidden
-		VISIBILITY_INLINES_HIDDEN YES)
+		CXX_EXTENSIONS OFF)
+	if(NOT WIN32)
+		set_target_properties(${target} PROPERTIES
+			CXX_VISIBILITY_PRESET hidden
+			VISIBILITY_INLINES_HIDDEN YES)
+	endif()
 	target_compile_definitions(${target} PRIVATE PIGGLE_BUILD)
 	if(UNIX)
 		target_compile_definitions(${target}

@@ -96,9 +96,12 @@ static inline pg_status pg_pigg_pool(pg_source *source, uint64_t offset,
 	if (count > bytes_size / 4)
 		return PG_CORRUPT;
 	end = offset + sizeof(header) + bytes_size;
-	if (end < offset || end > file_size ||
-	    count > SIZE_MAX / sizeof(*values))
+	if (end < offset || end > file_size)
 		return PG_CORRUPT;
+#if SIZE_MAX <= UINT32_MAX
+	if (count > SIZE_MAX / sizeof(*values))
+		return PG_CORRUPT;
+#endif
 	bytes = (uint8_t *)malloc(bytes_size ? bytes_size : 1);
 	if (!bytes)
 		return PG_NOMEM;
@@ -412,11 +415,16 @@ static inline pg_status pg_hogg_data(pg_source *source,
 		goto fail;
 	}
 	count = pg_read_u32(bytes + 4);
-	if (count > (stored_size - 8) / 4 ||
-	    count > SIZE_MAX / sizeof(*slots)) {
+	if (count > (stored_size - 8) / 4) {
 		status = PG_CORRUPT;
 		goto fail;
 	}
+#if SIZE_MAX <= UINT32_MAX
+	if (count > SIZE_MAX / sizeof(*slots)) {
+		status = PG_CORRUPT;
+		goto fail;
+	}
+#endif
 	slots = count ? (pg_pool_value *)calloc(count, sizeof(*slots)) : NULL;
 	if (count && !slots) {
 		status = PG_NOMEM;

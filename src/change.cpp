@@ -178,6 +178,7 @@ void pg_tree_native_remove_source(pg_tree *tree, pg_source *source)
 	if (tree->native_fd >= 0 && source->watch_wd >= 0)
 		inotify_rm_watch(tree->native_fd, source->watch_wd);
 #elif defined(_WIN32)
+	(void)tree;
 	if (source->native_watch) {
 		CancelIoEx(source->native_watch, NULL);
 		CloseHandle(source->native_watch);

@@ -1,4 +1,8 @@
 add_executable(piggle_cli main.cpp)
+if(piggle_ipo_supported)
+	set_property(TARGET piggle_cli PROPERTY
+		INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+endif()
 set_target_properties(piggle_cli PROPERTIES OUTPUT_NAME piggle
 	CXX_EXTENSIONS OFF CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES)
 target_link_libraries(piggle_cli PRIVATE piggle::piggle)
