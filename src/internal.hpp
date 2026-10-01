@@ -210,6 +210,9 @@ pg_status pg_native_target_lease(const char *path, int exists, int *out,
 
 struct pg_tree_source_state {
 	pg_source_record *records;
+	const char *prefix;
+	int scoped;
+	int recursive;
 	pg_source_request *exact_requests;
 	pg_source_request *prefix_requests;
 	pg_source_request *shallow_requests;

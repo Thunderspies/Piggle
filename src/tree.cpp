@@ -97,7 +97,8 @@ extern "C" {
 
 static int pg_tree_scope_covers(pg_tree *tree, const char *name);
 static pg_status pg_tree_sources_save_mode(pg_tree *tree,
-		pg_tree_source_state **out, int loose_only);
+		pg_tree_source_state **out, int loose_only,
+		const char *prefix = NULL, int recursive = 1);
 
 /* Allocate an empty tree and retain its context. */
 PG_API pg_status PG_CALL pg_tree_create(pg_context *context, pg_tree **out,
@@ -1206,7 +1207,8 @@ pg_status pg_tree_discover(pg_tree *tree, const char *prefix,
 		if (status != PG_OK)
 			goto request_done;
 	}
-	status = pg_tree_sources_save_mode(tree, &saved, 1);
+	status = pg_tree_sources_save_mode(tree, &saved, 1, canonical,
+		depth == PG_DISCOVER_RECURSIVE);
 	if (status != PG_OK)
 		goto request_done;
 	for (i = 0; i < tree->count; i++) {
@@ -1286,12 +1288,16 @@ static void pg_tree_records_free(pg_source_record *record)
 	}
 }
 
-static pg_source_record *pg_tree_records_clone(pg_source_record *source)
+static pg_source_record *pg_tree_records_clone(pg_source_record *source,
+		const char *prefix, int recursive, pg_status *status)
 {
 	pg_source_record *head = NULL;
 	pg_source_record **tail = &head;
 
 	for (; source; source = source->next) {
+		if (!pg_name_in_scope(source->info.canonical_name, prefix,
+			recursive))
+			continue;
 		pg_source_record *copy = (pg_source_record *)calloc(1,
 			sizeof(*copy));
 
@@ -1327,6 +1333,7 @@ static pg_source_record *pg_tree_records_clone(pg_source_record *source)
 
 clone_failed:
 	pg_tree_records_free(head);
+	*status = PG_NOMEM;
 	return NULL;
 }
 
@@ -1383,7 +1390,8 @@ void pg_tree_sources_discard(pg_tree *tree,
 }
 
 static pg_status pg_tree_sources_save_mode(pg_tree *tree,
-		pg_tree_source_state **out, int loose_only)
+		pg_tree_source_state **out, int loose_only,
+		const char *prefix, int recursive)
 {
 	pg_tree_source_state *saved = (pg_tree_source_state *)calloc(
 		tree->count ? tree->count : 1, sizeof(*saved));
@@ -1397,14 +1405,21 @@ static pg_status pg_tree_sources_save_mode(pg_tree *tree,
 		if (loose_only && source->format != PG_LOOSE)
 			continue;
 		saved[i].captured = 1;
+		/* Discovery only replaces records in the requested scope. Keep
+		 * unrelated records in place instead of cloning the entire source. */
+		saved[i].scoped = loose_only;
+		saved[i].prefix = prefix;
+		saved[i].recursive = recursive;
 		saved[i].identity = source->identity;
 		saved[i].generation = source->generation;
 		saved[i].loose_root_requested =
 			source->loose_root_requested;
 		if (source->records) {
+			pg_status status = PG_OK;
+
 			saved[i].records = pg_tree_records_clone(
-				source->records);
-			if (!saved[i].records)
+				source->records, prefix, recursive, &status);
+			if (status != PG_OK)
 				goto save_failed;
 		}
 		if (source->exact_requests) {
@@ -1449,11 +1464,32 @@ void pg_tree_sources_restore(pg_tree *tree,
 		if (!saved[i].captured)
 			continue;
 		pg_source_index_clear(source);
-		pg_tree_records_free(source->records);
+		pg_source_record **at = &source->records;
+
+		while (*at) {
+			pg_source_record *record = *at;
+
+			if (saved[i].scoped && !pg_name_in_scope(
+				record->info.canonical_name, saved[i].prefix,
+				saved[i].recursive)) {
+				at = &record->next;
+				continue;
+			}
+			*at = record->next;
+			record->next = NULL;
+			pg_tree_records_free(record);
+		}
 		pg_tree_requests_free(source->exact_requests);
 		pg_tree_requests_free(source->prefix_requests);
 		pg_tree_requests_free(source->shallow_requests);
-		source->records = saved[i].records;
+		if (saved[i].records) {
+			pg_source_record *tail = saved[i].records;
+
+			while (tail->next)
+				tail = tail->next;
+			tail->next = source->records;
+			source->records = saved[i].records;
+		}
 		source->exact_requests = saved[i].exact_requests;
 		source->prefix_requests = saved[i].prefix_requests;
 		source->shallow_requests = saved[i].shallow_requests;

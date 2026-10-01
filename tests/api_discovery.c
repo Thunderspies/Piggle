@@ -240,6 +240,67 @@ static int test_tree(void)
 	return 0;
 }
 
+static int test_scoped_rollback(void)
+{
+	static const char *nested[] = { "menu/a", "menu/sub/deep" };
+	static const char *leaf[] = { "leaf/a" };
+	pg_context *context = NULL;
+	pg_source *source = NULL;
+	pg_tree *tree = NULL;
+	pg_cursor *cursor = NULL;
+	pg_file *file = NULL;
+	pg_file_info info;
+	pg_error error;
+
+	CHECK(make_dir("root"));
+	CHECK(make_dir("root/menu"));
+	CHECK(make_dir("root/menu/sub"));
+	CHECK(make_dir("root/other"));
+	CHECK(make_dir("root/leaf"));
+	CHECK(put_file("root/leaf/a", "leaf") == 0);
+	CHECK(put_file("root/menu/a", "first") == 0);
+	CHECK(put_file("root/menu/sub/deep", "deep") == 0);
+	CHECK(put_file("root/other/a", "other") == 0);
+	CHECK(put_file("root/target", "old") == 0);
+	STATUS(pg_context_open(&context, &error), PG_OK);
+	STATUS(pg_source_open(context, "root", NULL, &source, &error),
+		PG_OK);
+	STATUS(pg_tree_create(context, &tree, &error), PG_OK);
+	STATUS(pg_tree_attach(tree, source, &error), PG_OK);
+	STATUS(pg_tree_discover(tree, NULL, PG_DISCOVER_RECURSIVE,
+		&error), PG_OK);
+
+	/* A failed recursive discovery restores only the affected copy. */
+	CHECK(put_file("root/target", "changed") == 0);
+	STATUS(pg_tree_discover(tree, "target", PG_DISCOVER_RECURSIVE,
+		&error), PG_CONFLICT);
+	STATUS(pg_source_find(source, "target", &file, &error), PG_OK);
+	STATUS(pg_file_inspect(file, &info, &error), PG_OK);
+	CHECK(info.logical_size == 3);
+	STATUS(pg_file_close(&file, &error), PG_OK);
+
+	/* Shallow rollback preserves unrelated cached descendants. */
+	CHECK(rename("root/leaf", "saved_leaf") == 0);
+	CHECK(put_file("root/leaf", "replacement") == 0);
+	STATUS(pg_tree_discover(tree, "leaf", PG_DISCOVER_CHILDREN,
+		&error), PG_CONFLICT);
+	STATUS(pg_tree_files(tree, "leaf", &cursor, &error), PG_OK);
+	CHECK(expect_names(cursor, leaf, 1) == 0);
+	STATUS(pg_cursor_close(&cursor, &error), PG_OK);
+	STATUS(pg_tree_files(tree, "menu", &cursor, &error), PG_OK);
+	CHECK(expect_names(cursor, nested, 2) == 0);
+	STATUS(pg_cursor_close(&cursor, &error), PG_OK);
+	STATUS(pg_tree_discover(tree, "other", PG_DISCOVER_RECURSIVE,
+		&error), PG_OK);
+	STATUS(pg_tree_files(tree, "menu", &cursor, &error), PG_OK);
+	CHECK(expect_names(cursor, nested, 2) == 0);
+	STATUS(pg_cursor_close(&cursor, &error), PG_OK);
+	STATUS(pg_tree_close(&tree, &error), PG_OK);
+	STATUS(pg_source_close(&source, &error), PG_OK);
+	STATUS(pg_context_close(&context, &error), PG_OK);
+	return 0;
+}
+
 static int test_bulk(void)
 {
 	pg_context *context = NULL;
@@ -544,6 +605,8 @@ int main(int argc, char **argv)
 		return test_source();
 	if (strcmp(argv[1], "tree") == 0)
 		return test_tree();
+	if (strcmp(argv[1], "scoped_rollback") == 0)
+		return test_scoped_rollback();
 	if (strcmp(argv[1], "bulk") == 0)
 		return test_bulk();
 	if (strcmp(argv[1], "source_scope") == 0)

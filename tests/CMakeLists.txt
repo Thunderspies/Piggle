@@ -168,7 +168,7 @@ foreach(case IN ITEMS coroutines guards)
 		WORKING_DIRECTORY "${case_dir}" LABELS contract)
 endforeach()
 
-set(discovery_cases source tree bulk source_scope)
+set(discovery_cases source tree bulk source_scope scoped_rollback)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 	list(APPEND discovery_cases windows_scan)
 endif()
