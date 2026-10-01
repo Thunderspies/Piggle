@@ -160,6 +160,8 @@ struct pg_source {
 	pg_source *next_in_context;
 	char *native_path;
 	pg_source_record *records;
+	pg_source_record **record_index;
+	size_t record_count;
 	pg_source_request *exact_requests;
 	pg_source_request *prefix_requests;
 	pg_source_request *shallow_requests;
@@ -187,6 +189,16 @@ struct pg_source {
 #endif
 	struct pg_tree *attached;
 };
+
+static inline void pg_source_index_clear(pg_source *source)
+{
+	free(source->record_index);
+	source->record_index = NULL;
+	source->record_count = 0;
+}
+
+pg_status pg_source_records_scope(pg_source *source, const char *prefix,
+		pg_source_record ***out, size_t *count);
 
 pg_status pg_source_sync_create(pg_source *source);
 void pg_source_sync_destroy(pg_source *source);
@@ -320,7 +332,7 @@ struct pg_cursor {
 };
 
 pg_status pg_indexed_directories(pg_source **sources, size_t count,
-		const char ***out, size_t *size);
+		const char *prefix, const char ***out, size_t *size);
 int pg_directory_names_contain(const char **names, size_t count,
 		const char *name);
 

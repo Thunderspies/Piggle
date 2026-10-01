@@ -1039,7 +1039,7 @@ pg_status pg_tree_files_depth(pg_tree *tree, const char *prefix,
 	if (status != PG_OK)
 		goto fail_early;
 	status = pg_indexed_directories(tree->sources, tree->count,
-		&directories, &directory_count);
+		canonical, &directories, &directory_count);
 	if (status != PG_OK)
 		goto fail_early;
 	merged = (pg_cursor *)calloc(1, sizeof(*merged));
@@ -1448,6 +1448,7 @@ void pg_tree_sources_restore(pg_tree *tree,
 
 		if (!saved[i].captured)
 			continue;
+		pg_source_index_clear(source);
 		pg_tree_records_free(source->records);
 		pg_tree_requests_free(source->exact_requests);
 		pg_tree_requests_free(source->prefix_requests);

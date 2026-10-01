@@ -25,15 +25,23 @@ static int pg_directory_compare(const void *left, const void *right)
 }
 
 pg_status pg_indexed_directories(pg_source **sources, size_t count,
-		const char ***out, size_t *size)
+		const char *prefix, const char ***out, size_t *size)
 {
 	size_t total = 0;
 
 	*out = NULL;
 	*size = 0;
 	for (size_t i = 0; i < count; i++) {
-		for (pg_source_record *r = sources[i]->records; r; r =
-			r->next) {
+		pg_source_record **records;
+		size_t scoped_count;
+		pg_status status = pg_source_records_scope(sources[i], prefix,
+			&records, &scoped_count);
+
+		if (status != PG_OK)
+			return status;
+		for (size_t j = 0; j < scoped_count; j++) {
+			pg_source_record *r = records[j];
+
 			if (!S_ISDIR(r->identity.st_mode))
 				continue;
 			if (total == SIZE_MAX / sizeof(**out))
@@ -48,8 +56,20 @@ pg_status pg_indexed_directories(pg_source **sources, size_t count,
 	if (!names)
 		return PG_NOMEM;
 	for (size_t i = 0; i < count; i++) {
-		for (pg_source_record *r = sources[i]->records; r; r =
-			r->next) {
+		pg_source_record **records;
+		size_t scoped_count;
+
+		pg_status status = pg_source_records_scope(sources[i], prefix,
+			&records, &scoped_count);
+
+		if (status != PG_OK) {
+			free(names);
+			*size = 0;
+			return status;
+		}
+		for (size_t j = 0; j < scoped_count; j++) {
+			pg_source_record *r = records[j];
+
 			if (S_ISDIR(r->identity.st_mode))
 				names[(*size)++] = r->info.canonical_name;
 		}
@@ -153,36 +173,18 @@ static int pg_entry_compare(const void *left, const void *right)
 	return strcmp(a->info.original_name, b->info.original_name);
 }
 
-static int pg_entry_record_compare(const void *left, const void *right)
-{
-	const pg_source_record *a = *(pg_source_record *const *)left;
-	const pg_source_record *b = *(pg_source_record *const *)right;
-
-	return strcmp(a->info.canonical_name, b->info.canonical_name);
-}
-
 static pg_status pg_entry_directories(pg_entry_cursor *cursor,
 		pg_source *source, size_t rank, const char *prefix,
 			uint32_t flags)
 {
 	pg_source_record **records;
-	size_t count = 0, index = 0;
-	pg_status status = PG_OK;
+	size_t count;
+	pg_status status = pg_source_records_scope(source, prefix,
+		&records, &count);
 
-	for (pg_source_record *r = source->records; r; r = r->next) {
-		if (count == SIZE_MAX / sizeof(*records))
-			return PG_LIMIT;
-		count++;
-	}
-	if (!count)
-		return PG_OK;
-	records = (pg_source_record **)malloc(count * sizeof(*records));
-	if (!records)
-		return PG_NOMEM;
-	for (pg_source_record *r = source->records; r; r = r->next)
-		records[index++] = r;
-	qsort(records, count, sizeof(*records), pg_entry_record_compare);
-	for (index = 0; index < count && status == PG_OK; index++) {
+	if (status != PG_OK)
+		return status;
+	for (size_t index = 0; index < count && status == PG_OK; index++) {
 		pg_source_record *record = records[index];
 		pg_entry_info info = {};
 		char *name = strdup(record->info.canonical_name);
@@ -222,7 +224,6 @@ static pg_status pg_entry_directories(pg_entry_cursor *cursor,
 		}
 		free(name);
 	}
-	free(records);
 	return status;
 }
 

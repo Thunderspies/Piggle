@@ -32,6 +32,103 @@ static pg_status pg_source_write_span(int fd, uint64_t offset,
 	return PG_OK;
 }
 
+extern "C" {
+static int pg_source_record_order(const void *left, const void *right);
+static int pg_source_items_directory(pg_source_record **items, size_t count,
+		const char *name);
+}
+
+/* Build once per structural refresh; source controls serialize its lifetime. */
+static pg_status pg_source_index_get(pg_source *source,
+		pg_source_record ***out, size_t *count)
+{
+	if (!source->record_index) {
+		size_t size = 0;
+
+		for (pg_source_record *r = source->records; r; r = r->next)
+			size++;
+		if (size > SIZE_MAX / sizeof(*source->record_index))
+			return PG_LIMIT;
+		pg_source_record **items = (pg_source_record **)malloc(
+			(size ? size : 1) * sizeof(*items));
+
+		if (!items)
+			return PG_NOMEM;
+		size_t i = 0;
+
+		for (pg_source_record *r = source->records; r; r = r->next)
+			items[i++] = r;
+		qsort(items, size, sizeof(*items), pg_source_record_order);
+		source->record_index = items;
+		source->record_count = size;
+	}
+	*out = source->record_index;
+	*count = source->record_count;
+	return PG_OK;
+}
+
+static pg_source_record *pg_source_index_last(pg_source_record **items,
+		size_t count, const char *name)
+{
+	size_t low = 0, high = count;
+
+	while (low < high) {
+		size_t middle = low + (high - low) / 2;
+
+		if (strcmp(items[middle]->info.canonical_name, name) <= 0)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	return low && !strcmp(items[low - 1]->info.canonical_name, name) ?
+		items[low - 1] : NULL;
+}
+
+static void pg_source_index_scope(pg_source_record **items, size_t count,
+		const char *prefix, size_t *begin, size_t *end)
+{
+	size_t low = 0, high = count;
+
+	while (low < high) {
+		size_t middle = low + (high - low) / 2;
+
+		if (pg_descendant_order(items[middle]->info.canonical_name,
+			prefix) < 0)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	*begin = low;
+	high = count;
+	while (low < high) {
+		size_t middle = low + (high - low) / 2;
+
+		if (pg_descendant_order(items[middle]->info.canonical_name,
+			prefix) <= 0)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	*end = low;
+}
+
+pg_status pg_source_records_scope(pg_source *source, const char *prefix,
+		pg_source_record ***out, size_t *count)
+{
+	pg_status status = pg_source_index_get(source, out, count);
+
+	if (status != PG_OK)
+		return status;
+	if (prefix && *prefix) {
+		size_t begin, end;
+
+		pg_source_index_scope(*out, *count, prefix, &begin, &end);
+		*out += begin;
+		*count = end - begin;
+	}
+	return PG_OK;
+}
+
 static int pg_source_field_mix(uint32_t current, uint32_t before,
 		uint32_t after)
 {
@@ -439,6 +536,7 @@ static pg_status pg_source_loose_probe(pg_source *source,
 		record->info.source_generation = source->generation;
 		record->info.copy_id = source->context->next_id++;
 		record->info.copy_generation = 1;
+		pg_source_index_clear(source);
 		record->next = source->records;
 		source->records = record;
 	}
@@ -513,6 +611,7 @@ static pg_status pg_source_loose_add(pg_source *source,
 	record->info.stored_size = record->info.logical_size;
 	record->info.mtime = identity->st_mtime;
 	record->info.encoding = PG_LOGICAL;
+	pg_source_index_clear(source);
 	record->next = source->records;
 	source->records = record;
 	return PG_OK;
@@ -535,6 +634,7 @@ static int pg_source_record_name_compare(const void *left,
 /* Select one original spelling for each canonical loose name. */
 static pg_status pg_source_loose_compact(pg_source *source)
 {
+	pg_source_index_clear(source);
 	pg_source_record **items;
 	pg_source_record *record;
 	size_t count = 0;
@@ -1135,11 +1235,23 @@ static int pg_source_request_covered(pg_source *source,
 	return 0;
 }
 
+static int pg_source_lookup_covered(pg_source *source, const char *name)
+{
+	if (pg_source_request_covered(source, name))
+		return 1;
+	for (pg_source_request *r = source->shallow_requests; r; r = r->next)
+		if (pg_name_in_scope(name, r->name, 0))
+			return 1;
+	return 0;
+}
+
 static pg_status pg_source_loose_scan_private(pg_source *source,
 		const char *prefix, int *native_code, int tree_request,
 		int shallow = 0)
 {
 	pg_source probe = *source;
+	probe.record_index = NULL;
+	probe.record_count = 0;
 	pg_source_record *old, *next;
 	pg_source_record **items = NULL;
 	size_t count = 0;
@@ -1213,6 +1325,7 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 		}
 	}
 	old = source->records;
+	pg_source_index_clear(source);
 	source->records = probe.records;
 	while (old) {
 		pg_source_record *found;
@@ -1297,6 +1410,7 @@ extern "C" pg_status pg_source_rebind_root(pg_source *source,
 	if (fd >= 0)
 		source->identity = opened;
 	source->generation++;
+	pg_source_index_clear(source);
 	source->records = NULL;
 	*changed = 1;
 	return PG_OK;
@@ -1316,6 +1430,7 @@ extern "C" void pg_source_rebind_finish(pg_root_binding *saved, int commit)
 		} else {
 			if (source->fd >= 0)
 				close(source->fd);
+			pg_source_index_clear(source);
 			pg_source_records_free(source->records);
 			source->fd = saved->fd;
 			source->records = saved->records;
@@ -1529,6 +1644,7 @@ pg_status pg_source_release(pg_source *source, int *native_code)
 	closed = source->fd >= 0 ? close(source->fd) : 0;
 	*native_code = closed ? errno : 0;
 	pg_context_child_drop(source->context);
+	pg_source_index_clear(source);
 	pg_source_records_free(source->records);
 	pg_source_requests_free(source->exact_requests);
 	pg_source_requests_free(source->prefix_requests);
@@ -1965,6 +2081,8 @@ static pg_status pg_source_pigg_clone(pg_source *source,
 		goto pigg_done;
 	}
 	probe = *source;
+	probe.record_index = NULL;
+	probe.record_count = 0;
 	probe.fd = fd;
 	probe.identity = created;
 	probe.records = NULL;
@@ -2027,6 +2145,7 @@ static pg_status pg_source_pigg_clone(pg_source *source,
 		record->info.copy_generation = 1;
 	}
 	source->generation++;
+	pg_source_index_clear(source);
 	pg_source_records_free(source->records);
 	source->records = probe.records;
 	probe.records = NULL;
@@ -3115,6 +3234,7 @@ PG_API pg_status PG_CALL pg_source_open(
 
 cleanup:
 	close(source->fd);
+	pg_source_index_clear(source);
 	pg_source_records_free(source->records);
 	free(source->native_path);
 	pg_source_sync_destroy(source);
@@ -3531,12 +3651,10 @@ static pg_status pg_source_find_mode(
 		pg_file **out,
 		pg_error *error, int fresh)
 {
-	pg_source_record *record;
 	pg_source_record *selected = NULL;
 	pg_source_record *transient = NULL;
 	char *canonical;
 	size_t required = 0;
-	size_t length;
 	pg_status status;
 	int native_code = 0;
 
@@ -3565,10 +3683,11 @@ static pg_status pg_source_find_mode(
 		free(canonical);
 		return pg_result(status, error);
 	}
-	length = strlen(canonical);
 	if (source->format == PG_LOOSE &&
-	    (fresh || !pg_source_request_covered(source, canonical))) {
+	    (fresh || !pg_source_lookup_covered(source, canonical))) {
 		pg_source probe = *source;
+		probe.record_index = NULL;
+		probe.record_count = 0;
 
 		if (!fresh) {
 			status = pg_source_request_add(
@@ -3592,17 +3711,19 @@ static pg_status pg_source_find_mode(
 		if (fresh)
 			transient = probe.records;
 	} else {
-		for (record = source->records; record; record = record->next) {
-			if (strncmp(record->info.canonical_name, canonical,
-				length) != 0)
-				continue;
-			if (record->info.canonical_name[length] == '/') {
-				free(canonical);
-				return pg_result(PG_CONFLICT, error);
-			}
-			if (!record->info.canonical_name[length])
-				selected = record;
+		pg_source_record **items;
+		size_t count;
+
+		status = pg_source_index_get(source, &items, &count);
+		if (status != PG_OK) {
+			free(canonical);
+			return pg_result(status, error);
 		}
+		if (pg_source_items_directory(items, count, canonical)) {
+			free(canonical);
+			return pg_result(PG_CONFLICT, error);
+		}
+		selected = pg_source_index_last(items, count, canonical);
 	}
 	free(canonical);
 	if (!selected)
@@ -3645,6 +3766,16 @@ static int pg_source_record_order(const void *left, const void *right)
 pg_status pg_source_name_kind(pg_source *source, const char *name)
 {
 	pg_status status = PG_NOT_FOUND;
+	if (source->record_index) {
+		if (pg_source_items_directory(source->record_index,
+			source->record_count, name))
+			return PG_CONFLICT;
+		pg_source_record *r = pg_source_index_last(source->record_index,
+			source->record_count, name);
+
+		return !r ? PG_NOT_FOUND : S_ISDIR(r->identity.st_mode) ?
+			PG_CONFLICT : PG_OK;
+	}
 
 	for (pg_source_record *record = source->records; record;
 	     record = record->next) {
@@ -3794,10 +3925,9 @@ pg_status pg_source_files_depth(pg_source *source, const char *prefix,
 		int recursive, pg_cursor **out, pg_error *error)
 {
 	pg_source_record **items = NULL;
-	pg_source_record *record;
 	pg_cursor *cursor;
 	char *canonical = NULL;
-	size_t required = 0, count = 0, i, kept = 0;
+	size_t required = 0, count = 0, i;
 	pg_status status;
 
 	if (!out)
@@ -3829,33 +3959,20 @@ pg_status pg_source_files_depth(pg_source *source, const char *prefix,
 		status = PG_INVALID;
 		goto fail_early;
 	}
+	status = pg_source_index_get(source, &items, &count);
+	if (status != PG_OK)
+		goto fail_early;
 	if (canonical && pg_source_name_kind(source, canonical) == PG_OK) {
 		status = PG_CONFLICT;
 		goto fail_early;
 	}
-	for (record = source->records; record; record = record->next) {
-		if (!canonical || (pg_source_in_prefix(
-			record->info.canonical_name, canonical) &&
-			strcmp(record->info.canonical_name, canonical) != 0))
-			count++;
+	if (canonical) {
+		size_t begin, end;
+
+		pg_source_index_scope(items, count, canonical, &begin, &end);
+		items += begin;
+		count = end - begin;
 	}
-	if (count > SIZE_MAX / sizeof(*items)) {
-		status = PG_LIMIT;
-		goto fail_early;
-	}
-	items = (pg_source_record **)malloc((count ? count : 1) *
-		sizeof(*items));
-	if (!items) {
-		status = PG_NOMEM;
-		goto fail_early;
-	}
-	for (record = source->records; record; record = record->next) {
-		if (!canonical || (pg_source_in_prefix(
-			record->info.canonical_name, canonical) &&
-			strcmp(record->info.canonical_name, canonical) != 0))
-			items[kept++] = record;
-	}
-	qsort(items, count, sizeof(*items), pg_source_record_order);
 	cursor = (pg_cursor *)calloc(1, sizeof(*cursor));
 	if (!cursor) {
 		status = PG_NOMEM;
@@ -3896,7 +4013,6 @@ pg_status pg_source_files_depth(pg_source *source, const char *prefix,
 		}
 		i = next;
 	}
-	free(items);
 	free(canonical);
 	*out = cursor;
 	return pg_result(PG_OK, error);
@@ -3904,7 +4020,6 @@ pg_status pg_source_files_depth(pg_source *source, const char *prefix,
 fail_cursor:
 	pg_cursor_close(&cursor, NULL);
 fail_early:
-	free(items);
 	free(canonical);
 	return pg_result(status, error);
 }
@@ -3939,6 +4054,7 @@ static pg_status pg_source_rescan_locked(
 	if (status != PG_OK)
 		return pg_result(status, error);
 	if (source->format == PG_LOOSE && source->fd < 0) {
+		pg_source_index_clear(source);
 		pg_source_records_free(source->records);
 		source->records = NULL;
 		return pg_result(PG_OK, error);
@@ -3949,6 +4065,8 @@ static pg_status pg_source_rescan_locked(
 		size_t count = 0;
 
 		probe = *source;
+		probe.record_index = NULL;
+		probe.record_count = 0;
 		probe.records = NULL;
 		if (source->loose_root_requested) {
 			status = pg_source_loose_scan(&probe,
@@ -4016,6 +4134,7 @@ static pg_status pg_source_rescan_locked(
 			}
 		}
 		free(items);
+		pg_source_index_clear(source);
 		pg_source_records_free(source->records);
 		source->records = probe.records;
 		return pg_result(PG_OK, error);
@@ -4030,6 +4149,8 @@ static pg_status pg_source_rescan_locked(
 	    !pg_native_stat_same(&current, &path_state))
 		return pg_result(PG_STALE, error);
 	probe = *source;
+	probe.record_index = NULL;
+	probe.record_count = 0;
 	probe.records = NULL;
 	probe.identity = current;
 	status = source->format == PG_PIGG2 ?
@@ -4104,6 +4225,7 @@ static pg_status pg_source_rescan_locked(
 			record->info.copy_generation++;
 		}
 	}
+	pg_source_index_clear(source);
 	pg_source_records_free(source->records);
 	source->records = probe.records;
 	source->identity = current;

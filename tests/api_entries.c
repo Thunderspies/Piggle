@@ -251,6 +251,59 @@ static int metadata_case(void)
 	return 0;
 }
 
+static int shallow_lookup(void)
+{
+	pg_context *context = NULL;
+	pg_source *source = NULL;
+	pg_file *file = NULL;
+	pg_file_info info;
+	pg_error error;
+
+	CHECK(!directory("indexed"));
+	CHECK(!directory("indexed/nested"));
+	CHECK(!put_bytes("indexed/file", payload, sizeof(payload)));
+	CHECK(!put_bytes("indexed/nested/file", payload, sizeof(payload)));
+	STATUS(pg_context_open(&context, &error), PG_OK);
+	STATUS(pg_source_open(context, "indexed", NULL, &source, &error),
+		PG_OK);
+	STATUS(pg_source_discover(source, NULL, PG_DISCOVER_CHILDREN,
+		&error), PG_OK);
+	CHECK(!put_bytes("indexed/file", "x", 1));
+	CHECK(!put_bytes("indexed/new", payload, sizeof(payload)));
+	STATUS(pg_source_find(source, "file", &file, &error), PG_OK);
+	STATUS(pg_file_inspect(file, &info, &error), PG_OK);
+	CHECK(info.logical_size == sizeof(payload));
+	STATUS(pg_file_close(&file, &error), PG_OK);
+	STATUS(pg_source_find(source, "new", &file, &error), PG_NOT_FOUND);
+	/* Shallow coverage stops at immediate children, including directories. */
+	STATUS(pg_source_find(source, "nested", &file, &error), PG_CONFLICT);
+	STATUS(pg_source_find(source, "nested/file", &file, &error), PG_OK);
+	STATUS(pg_file_close(&file, &error), PG_OK);
+	STATUS(pg_source_discover(source, "nested", PG_DISCOVER_CHILDREN,
+		&error), PG_OK);
+	CHECK(!put_bytes("indexed/nested/file", "x", 1));
+	CHECK(!put_bytes("indexed/nested/new", payload, sizeof(payload)));
+	STATUS(pg_source_find(source, "nested/file", &file, &error), PG_OK);
+	STATUS(pg_file_inspect(file, &info, &error), PG_OK);
+	CHECK(info.logical_size == sizeof(payload));
+	STATUS(pg_file_close(&file, &error), PG_OK);
+	STATUS(pg_source_find(source, "nested/new", &file, &error),
+		PG_NOT_FOUND);
+	STATUS(pg_source_discover(source, NULL, PG_DISCOVER_CHILDREN,
+		&error), PG_OK);
+	STATUS(pg_source_find(source, "file", &file, &error), PG_OK);
+	STATUS(pg_file_inspect(file, &info, &error), PG_OK);
+	CHECK(info.logical_size == 1);
+	STATUS(pg_file_close(&file, &error), PG_OK);
+	STATUS(pg_source_find(source, "new", &file, &error), PG_OK);
+	STATUS(pg_file_close(&file, &error), PG_OK);
+	STATUS(pg_source_close(&source, &error), PG_OK);
+	STATUS(pg_context_close(&context, &error), PG_OK);
+	CHECK(remove("indexed/new") == 0);
+	CHECK(remove("indexed/nested/new") == 0);
+	return 0;
+}
+
 static int shallow(void)
 {
 	pg_context *context = NULL;
@@ -287,7 +340,7 @@ static int shallow(void)
 	STATUS(pg_tree_close(&tree, &error), PG_OK);
 	STATUS(pg_source_close(&source, &error), PG_OK);
 	STATUS(pg_context_close(&context, &error), PG_OK);
-	return 0;
+	return shallow_lookup();
 }
 
 int main(int argc, char **argv)
