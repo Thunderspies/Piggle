@@ -67,6 +67,25 @@ foreach(case IN ITEMS native empty stale checksum pigg_raw hogg_raw pigg_zlib
 endforeach()
 add_executable(piggle_api_discovery api_discovery.c)
 add_executable(piggle_api_entries api_entries.c)
+add_executable(piggle_api_threads api_threads.c)
+target_link_libraries(piggle_api_threads PRIVATE piggle::piggle
+	Threads::Threads)
+set(thread_modes off scan)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
+	list(APPEND thread_modes native)
+endif()
+foreach(format IN ITEMS loose pigg hogg)
+	foreach(mode IN LISTS thread_modes)
+		set(case_dir
+			"${CMAKE_CURRENT_BINARY_DIR}/threads_${format}_${mode}")
+		file(MAKE_DIRECTORY "${case_dir}")
+		add_test(NAME api_threads_${format}_${mode}
+			COMMAND piggle_api_threads ${format} ${mode})
+		set_tests_properties(api_threads_${format}_${mode} PROPERTIES
+			WORKING_DIRECTORY "${case_dir}"
+			LABELS contract TIMEOUT 60)
+	endforeach()
+endforeach()
 target_link_libraries(piggle_api_entries PRIVATE piggle::piggle)
 foreach(case IN ITEMS loose tree pigg hogg metadata shallow)
 	set(case_dir "${CMAKE_CURRENT_BINARY_DIR}/entries_${case}")

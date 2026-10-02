@@ -69,8 +69,8 @@ PG_API pg_status PG_CALL pg_tree_entries(pg_tree *tree,
 /* Next captured entry. out and file required and zero/NULL on error or END.
  * File entry transfers one owned physical selection; close it independently
  * with pg_file_close. Directory yields NULL file. Metadata spans continue
- * borrowing the cursor, even after its selected file is closed. Same source
- * control rules as file cursors. Failed calls do not advance the cursor.
+ * borrowing the cursor, even after its selected file is closed. Workers
+ * allowed; serialize this cursor. Failed calls do not advance the cursor.
  */
 PG_API pg_status PG_CALL pg_entry_cursor_next(pg_entry_cursor *cursor,
 		pg_entry_info *out, pg_file **file, pg_error *error);

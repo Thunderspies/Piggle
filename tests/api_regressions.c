@@ -190,9 +190,9 @@ static int worker_cleanup(int cursor_case)
 		STATUS(pg_reader_open_tree(tree, "a", PG_READ_LOGICAL,
 			&work.reader, &error), PG_OK);
 	CHECK(!run_worker(&work));
-	CHECK(work.status == (cursor_case ? PG_BUSY : PG_OK));
+	CHECK(work.status == PG_OK);
 	if (cursor_case) {
-		CHECK(work.cursor);
+		CHECK(!work.cursor);
 		STATUS(pg_cursor_close(&work.cursor, &error), PG_OK);
 	}
 	STATUS(pg_tree_close(&tree, &error), PG_OK);
