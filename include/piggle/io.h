@@ -14,8 +14,8 @@ extern "C" {
  * staleness, metadata and verification rules as the selected-file reader.
  * out required, NULL until successful return after temporary cleanup.
  * Failure closes private reader/selection and preserves the first error.
- * Name/out borrow through return; control follows source. Standalone-source
- * callback use allowed, but callback spans expire on callback return.
+ * Name/out borrow through return; workers and read-only observer callbacks
+ * allowed, but callback spans expire on callback return.
  * Returned reader retains its dependencies; name may expire after open.
  * Subsequent read/close may move to a worker with per-reader serialization.
  */
@@ -24,7 +24,8 @@ PG_API pg_status PG_CALL pg_reader_open_source(pg_source *source,
 		pg_error *error);
 
 /* Same named-reader contract, selecting the visible overlay winner once.
- * Open runs on the tree control thread; later attachments never retarget.
+ * Open accepts workers; selection/setup synchronize with tree control.
+ * Later attachments never retarget.
  * While tree watching is active, this reader tracks its virtual name until
  * close; no initial event. Opening during an observer callback is allowed.
  * Read/close obey reader serialization.

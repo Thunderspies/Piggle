@@ -1358,7 +1358,7 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 }
 
 /* Rebind a managed root after replacement without traversing its files. */
-extern "C" pg_status pg_source_rebind_root(pg_source *source,
+static pg_status pg_source_rebind_root_coordinated(pg_source *source,
 		int *changed, pg_root_binding **saved, pg_error *error)
 {
 	struct stat current, opened = {};
@@ -1416,6 +1416,21 @@ extern "C" pg_status pg_source_rebind_root(pg_source *source,
 	return PG_OK;
 }
 
+extern "C" pg_status pg_source_rebind_root(pg_source *source,
+		int *changed, pg_root_binding **saved, pg_error *error)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(source);
+	pg_status status = pg_source_rebind_root_coordinated(source, changed,
+		saved, error);
+
+	pg_source_unlock(source);
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Keep prior observations available until the whole refresh succeeds. */
 extern "C" void pg_source_rebind_finish(pg_root_binding *saved, int commit)
 {
@@ -1423,6 +1438,7 @@ extern "C" void pg_source_rebind_finish(pg_root_binding *saved, int commit)
 		pg_root_binding *next = saved->next;
 		pg_source *source = saved->source;
 
+		pg_source_lock(source);
 		if (commit) {
 			if (saved->fd >= 0)
 				close(saved->fd);
@@ -1437,12 +1453,13 @@ extern "C" void pg_source_rebind_finish(pg_root_binding *saved, int commit)
 			source->identity = saved->identity;
 			source->generation = saved->generation;
 		}
+		pg_source_unlock(source);
 		free(saved);
 		saved = next;
 	}
 }
 
-extern "C" pg_status pg_source_refresh_name(pg_source *source,
+static pg_status pg_source_refresh_name_coordinated(pg_source *source,
 		const char *name, int recursive, pg_error *error)
 {
 	int native_code = 0;
@@ -1450,6 +1467,21 @@ extern "C" pg_status pg_source_refresh_name(pg_source *source,
 		&native_code, 1, recursive ? 0 : 2);
 
 	return pg_native_result(status, native_code, error);
+}
+
+extern "C" pg_status pg_source_refresh_name(pg_source *source,
+		const char *name, int recursive, pg_error *error)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(source);
+	pg_status status = pg_source_refresh_name_coordinated(source, name,
+		recursive, error);
+
+	pg_source_unlock(source);
+	pg_context_unlock(context);
+	return status;
 }
 
 static pg_status pg_source_loose_validate_dir(int dir, int *native_code)
@@ -1629,7 +1661,8 @@ pg_status pg_source_retain(pg_source *source)
 	return PG_OK;
 }
 
-pg_status pg_source_release(pg_source *source, int *native_code)
+static pg_status pg_source_release_coordinated(
+		pg_source *source, int *native_code)
 {
 	pg_source **at;
 	int closed;
@@ -1653,6 +1686,17 @@ pg_status pg_source_release(pg_source *source, int *native_code)
 	pg_source_sync_destroy(source);
 	free(source);
 	return closed ? PG_IO : PG_OK;
+}
+
+pg_status pg_source_release(pg_source *source, int *native_code)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_source_release_coordinated(source, native_code);
+
+	pg_context_unlock(context);
+	return status;
 }
 
 static pg_status pg_source_hogg_commit(pg_source *source,
@@ -2194,7 +2238,8 @@ pigg_done:
 	return status;
 }
 
-pg_status pg_source_pigg_delete(pg_file *file, pg_error *error)
+static pg_status pg_source_pigg_delete_coordinated(
+		pg_file *file, pg_error *error)
 {
 	pg_source *source = file->source;
 	pg_source_record *record;
@@ -2216,6 +2261,19 @@ pg_status pg_source_pigg_delete(pg_file *file, pg_error *error)
 		return pg_result(PG_STALE, error);
 	return pg_source_pigg_clone(source, NULL, NULL,
 		(uint32_t)record->info.archive_record, UINT32_MAX, error);
+}
+
+pg_status pg_source_pigg_delete(pg_file *file, pg_error *error)
+{
+	pg_context *context = file->source->context;
+
+	pg_context_lock(context);
+	pg_source_lock(file->source);
+	pg_status status = pg_source_pigg_delete_coordinated(file, error);
+
+	pg_source_unlock(file->source);
+	pg_context_unlock(context);
+	return status;
 }
 
 static pg_status pg_source_hogg_delete_locked(pg_file *file, pg_error *error)
@@ -3066,7 +3124,7 @@ extern "C" {
 /* Validate options and resolve native identity. */
 /* Detect format; index archive names or prepare lazy loose discovery. */
 /* Publish source only after complete setup; unwind on failure. */
-PG_API pg_status PG_CALL pg_source_open(
+static pg_status PG_CALL pg_source_open_coordinated(
 		pg_context *context,
 		const char *native_path,
 		const pg_source_options *options,
@@ -3242,9 +3300,24 @@ cleanup:
 	return pg_native_result(status, native_code, error);
 }
 
+PG_API pg_status PG_CALL pg_source_open(
+		pg_context *context,
+		const char *native_path,
+		const pg_source_options *options,
+		pg_source **out,
+		pg_error *error)
+{
+	pg_context_lock(context);
+	pg_status status = pg_source_open_coordinated(context, native_path,
+		options, out, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Validate handle and output slot. */
 /* Copy captured metadata and preserve borrowed-span lifetime. */
-PG_API pg_status PG_CALL pg_source_inspect(pg_source *source,
+static pg_status PG_CALL pg_source_inspect_coordinated(pg_source *source,
 		pg_source_info *out, pg_error *error)
 {
 	if (out)
@@ -3258,6 +3331,20 @@ PG_API pg_status PG_CALL pg_source_inspect(pg_source *source,
 	out->access = source->access;
 	out->checksum_domain = source->checksum_domain;
 	return pg_result(PG_OK, error);
+}
+
+PG_API pg_status PG_CALL pg_source_inspect(pg_source *source,
+		pg_source_info *out, pg_error *error)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(source);
+	pg_status status = pg_source_inspect_coordinated(source, out, error);
+
+	pg_source_unlock(source);
+	pg_context_unlock(context);
+	return status;
 }
 
 /* Select the exact file and inspect its logical size. */
@@ -3490,8 +3577,9 @@ PG_API pg_status PG_CALL pg_source_copy(
 }
 
 /* Export one source-visible selection and preserve its first outcome. */
-PG_API pg_status PG_CALL pg_source_export(pg_source *source,
-		const char *name, const char *native_output, uint32_t flags, pg_error *error)
+static pg_status PG_CALL pg_source_export_coordinated(pg_source *source,
+		const char *name, const char *native_output, uint32_t flags,
+		pg_error *error)
 {
 	pg_file *file = NULL;
 	pg_error work_error, close_error;
@@ -3500,6 +3588,9 @@ PG_API pg_status PG_CALL pg_source_export(pg_source *source,
 	if (!source || !name || !native_output || !*native_output ||
 	    (flags & ~PG_OVERWRITE))
 		return pg_result(PG_INVALID, error);
+	status = pg_source_control_status(source, 1);
+	if (status != PG_OK)
+		return pg_result(status, error);
 	status = pg_source_find(source, name, &file, &work_error);
 	if (status != PG_OK) {
 		if (error)
@@ -3517,6 +3608,20 @@ PG_API pg_status PG_CALL pg_source_export(pg_source *source,
 	}
 	if (error)
 		*error = work_error;
+	return status;
+}
+
+PG_API pg_status PG_CALL pg_source_export(pg_source *source,
+		const char *name, const char *native_output, uint32_t flags,
+		pg_error *error)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_source_export_coordinated(source, name,
+		native_output, flags, error);
+
+	pg_context_unlock(context);
 	return status;
 }
 
@@ -3645,7 +3750,7 @@ pg_status pg_source_select(pg_source *source,
 	return pg_result(PG_OK, error);
 }
 
-static pg_status pg_source_find_mode(
+static pg_status pg_source_find_mode_coordinated(
 		pg_source *source,
 		const char *name,
 		pg_file **out,
@@ -3737,6 +3842,24 @@ static pg_status pg_source_find_mode(
 	return status;
 }
 
+static pg_status pg_source_find_mode(
+		pg_source *source,
+		const char *name,
+		pg_file **out,
+		pg_error *error, int fresh)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(source);
+	pg_status status = pg_source_find_mode_coordinated(source, name, out,
+		error, fresh);
+
+	pg_source_unlock(source);
+	pg_context_unlock(context);
+	return status;
+}
+
 PG_API pg_status PG_CALL pg_source_find(pg_source *source,
 		const char *name, pg_file **out, pg_error *error)
 {
@@ -3763,7 +3886,8 @@ static int pg_source_record_order(const void *left, const void *right)
 	return a->info.copy_id > b->info.copy_id;
 }
 
-pg_status pg_source_name_kind(pg_source *source, const char *name)
+static pg_status pg_source_name_kind_coordinated(
+		pg_source *source, const char *name)
 {
 	pg_status status = PG_NOT_FOUND;
 	if (source->record_index) {
@@ -3789,6 +3913,19 @@ pg_status pg_source_name_kind(pg_source *source, const char *name)
 		if (!strcmp(candidate, name))
 			status = PG_OK;
 	}
+	return status;
+}
+
+pg_status pg_source_name_kind(pg_source *source, const char *name)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(source);
+	pg_status status = pg_source_name_kind_coordinated(source, name);
+
+	pg_source_unlock(source);
+	pg_context_unlock(context);
 	return status;
 }
 
@@ -3827,7 +3964,7 @@ static int pg_source_items_directory(pg_source_record **items, size_t count,
 	return 0;
 }
 
-static pg_status pg_source_discover_mode(pg_source *source,
+static pg_status pg_source_discover_mode_coordinated(pg_source *source,
 		const char *prefix, uint32_t depth, pg_error *error,
 		int tree_request)
 {
@@ -3886,6 +4023,22 @@ static pg_status pg_source_discover_mode(pg_source *source,
 	return pg_native_result(status, native_code, error);
 }
 
+static pg_status pg_source_discover_mode(pg_source *source,
+		const char *prefix, uint32_t depth, pg_error *error,
+		int tree_request)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(source);
+	pg_status status = pg_source_discover_mode_coordinated(source, prefix,
+		depth, error, tree_request);
+
+	pg_source_unlock(source);
+	pg_context_unlock(context);
+	return status;
+}
+
 pg_status pg_source_discover(pg_source *source, const char *prefix,
 		uint32_t depth, pg_error *error)
 {
@@ -3921,7 +4074,8 @@ static int pg_source_children_covered(pg_source *source, const char *prefix)
 }
 
 /* Capture visible source files in canonical order without native probes. */
-pg_status pg_source_files_depth(pg_source *source, const char *prefix,
+static pg_status pg_source_files_depth_coordinated(
+		pg_source *source, const char *prefix,
 		int recursive, pg_cursor **out, pg_error *error)
 {
 	pg_source_record **items = NULL;
@@ -4022,6 +4176,21 @@ fail_cursor:
 fail_early:
 	free(canonical);
 	return pg_result(status, error);
+}
+
+pg_status pg_source_files_depth(pg_source *source, const char *prefix,
+		int recursive, pg_cursor **out, pg_error *error)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(source);
+	pg_status status = pg_source_files_depth_coordinated(source, prefix,
+		recursive, out, error);
+
+	pg_source_unlock(source);
+	pg_context_unlock(context);
+	return status;
 }
 
 /* Refresh indexed archives without changing retained selections on failure. */
@@ -4373,7 +4542,7 @@ static pg_status pg_source_validate_locked(
 }
 
 /* Replay a committed HOGG journal before exposing its updated index. */
-PG_API pg_status PG_CALL pg_source_recover(
+static pg_status PG_CALL pg_source_recover_coordinated(
 		pg_context *context,
 		const char *native_path,
 		pg_error *error)
@@ -4738,8 +4907,21 @@ cleanup_recover:
 	return status;
 }
 
+PG_API pg_status PG_CALL pg_source_recover(
+		pg_context *context,
+		const char *native_path,
+		pg_error *error)
+{
+	pg_context_lock(context);
+	pg_status status = pg_source_recover_coordinated(context, native_path,
+		error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Remove a detached writable source without following native links. */
-PG_API pg_status PG_CALL pg_source_delete(
+static pg_status PG_CALL pg_source_delete_coordinated(
 		pg_source *source,
 		pg_error *error)
 {
@@ -4829,10 +5011,25 @@ delete_done:
 	return pg_native_result(status, native_code, error);
 }
 
+PG_API pg_status PG_CALL pg_source_delete(
+		pg_source *source,
+		pg_error *error)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(source);
+	pg_status status = pg_source_delete_coordinated(source, error);
+
+	pg_source_unlock(source);
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Accept a null owned handle as a no-op. */
 /* Check close constraints; release resources and references. */
 /* Clear the owned pointer once close is accepted. */
-PG_API pg_status PG_CALL pg_source_close(
+static pg_status PG_CALL pg_source_close_coordinated(
 		pg_source **source,
 		pg_error *error)
 {
@@ -4845,18 +5042,33 @@ PG_API pg_status PG_CALL pg_source_close(
 	if (!*source)
 		return pg_result(PG_OK, error);
 	owned = *source;
-	pg_status control = pg_source_control_status(owned, 1);
-
-	if (control != PG_OK)
-		return pg_result(control, error);
+	if (owned->attached && pg_tree_on_control_thread(owned->attached)) {
+		status = pg_tree_control_status(owned->attached, 1);
+		if (status != PG_OK)
+			return pg_result(status, error);
+	}
 	*source = NULL;
 	status = pg_source_release(owned, &native_code);
 	return pg_native_result(status, native_code, error);
 }
 
+PG_API pg_status PG_CALL pg_source_close(
+		pg_source **source,
+		pg_error *error)
+{
+	pg_context *context = source && *source ? (*source)->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_source_close_coordinated(source, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 } /* extern "C" */
 
-pg_status pg_source_rescan(pg_source *source, pg_error *error)
+static pg_status pg_source_rescan_coordinated(
+		pg_source *source, pg_error *error)
 {
 	pg_source_lock(source);
 	pg_status status = pg_source_rescan_locked(source, error);
@@ -4865,11 +5077,34 @@ pg_status pg_source_rescan(pg_source *source, pg_error *error)
 	return status;
 }
 
-pg_status pg_source_validate(pg_source *source, pg_error *error)
+pg_status pg_source_rescan(pg_source *source, pg_error *error)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_source_rescan_coordinated(source, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
+static pg_status pg_source_validate_coordinated(
+		pg_source *source, pg_error *error)
 {
 	pg_source_lock(source);
 	pg_status status = pg_source_validate_locked(source, error);
 
 	pg_source_unlock(source);
+	return status;
+}
+
+pg_status pg_source_validate(pg_source *source, pg_error *error)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_source_validate_coordinated(source, error);
+
+	pg_context_unlock(context);
 	return status;
 }

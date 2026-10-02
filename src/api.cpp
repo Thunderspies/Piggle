@@ -15,6 +15,12 @@ PG_API pg_status PG_CALL pg_context_open(pg_context **out,
 	pg_context *context = (pg_context *)calloc(1, sizeof(*context));
 	if (!context)
 		return pg_result(PG_NOMEM, error);
+	pg_status status = pg_context_sync_create(context);
+
+	if (status != PG_OK) {
+		free(context);
+		return pg_result(status, error);
+	}
 	context->next_id = 1;
 	*out = context;
 	return pg_result(PG_OK, error);
@@ -31,6 +37,7 @@ PG_API pg_status PG_CALL pg_context_close(pg_context **context,
 		return pg_result(PG_OK, error);
 	if (pg_context_children(*context))
 		return pg_result(PG_BUSY, error);
+	pg_context_sync_destroy(*context);
 	free(*context);
 	*context = NULL;
 	return pg_result(PG_OK, error);

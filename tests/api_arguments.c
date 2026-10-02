@@ -165,6 +165,10 @@ static int reader_arguments(struct fixture *f)
 	size_t count = 123;
 	unsigned char bytes[sizeof(payload)];
 
+	reader = (pg_reader *)(uintptr_t)1;
+	STATUS(pg_reader_open(NULL, PG_READ_LOGICAL, &reader, &error),
+		PG_INVALID);
+	CHECK(reader == NULL);
 	STATUS(pg_reader_open(f->file, UINT32_MAX, &reader, &error),
 		PG_INVALID);
 	CHECK(reader == NULL);

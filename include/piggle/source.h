@@ -16,8 +16,9 @@ extern "C" {
  * Same-context native alias already open -> BUSY. Writable HOGGs also hold
  * an exclusive OS lease through final reference release; contention -> BUSY.
  * Owned source on success.
- * Standalone source control calls serialize; attached controls use tree
- * thread. Relative paths require stable cwd until completion.
+ * Standalone source control calls serialize; attached mutations use the tree
+ * thread. Lookup, listings, reads and reference cleanup accept workers and
+ * synchronize with control. Relative paths require stable cwd until return.
  */
 PG_API pg_status PG_CALL pg_source_open(
 		pg_context *context,
@@ -27,7 +28,8 @@ PG_API pg_status PG_CALL pg_source_open(
 		pg_error *error);
 
 /* Immediate snapshot; out required, initialized even on error. native_path
- * borrows source lifetime. No native I/O. Serialize with source control.
+ * borrows source lifetime. No native I/O. Workers allowed; serialize access
+ * to this owned reference.
  */
 PG_API pg_status PG_CALL pg_source_inspect(pg_source *source,
 		pg_source_info *out, pg_error *error);
@@ -44,7 +46,7 @@ PG_API pg_status PG_CALL pg_source_inspect(pg_source *source,
  * empty files still verified.
  * Name/buffer/bytes borrow through return. Close all private handles; retain the
  * first error, report cleanup failure only if work succeeded. Serialize with
- * source control; allowed during a read-only observer callback.
+ * this output slot; workers and read-only observer callbacks allowed.
  */
 PG_API pg_status PG_CALL pg_source_read_all(pg_source *source,
 		const char *name, void *buffer, size_t capacity, size_t *bytes,
@@ -58,7 +60,7 @@ PG_API pg_status PG_CALL pg_source_read_all(pg_source *source,
  * Publish out only on success after all private cleanup; failure frees private
  * bytes and leaves out empty. No NUL terminator. Empty success is OK/NULL/0;
  * release with pg_buffer_free. Name and output borrow through return. Same
- * source control and callback rules as source_read_all.
+ * threading and callback rules as source_read_all.
  */
 PG_API pg_status PG_CALL pg_source_read_all_alloc(pg_source *source,
 		const char *name, size_t max_bytes, pg_buffer *out,
@@ -223,7 +225,8 @@ PG_API pg_status PG_CALL pg_source_delete(
 /* Release one owned reference; never commit or delete backing data.
  * Address required; NULL *handle succeeds. Accepted close clears it;
  * rejection leaves it owned. Cleanup may block and report IO, but the
- * reference stays consumed.
+ * reference stays consumed. Workers allowed; serialize this owned reference.
+ * Control-thread close in an attached tree's callback returns REENTRANT.
  */
 PG_API pg_status PG_CALL pg_source_close(
 		pg_source **source,
