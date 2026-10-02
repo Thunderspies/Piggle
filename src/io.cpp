@@ -1038,7 +1038,7 @@ static pg_status pg_reader_open_locked(
 	if (!out)
 		return pg_result(PG_INVALID, error);
 	*out = NULL;
-	if (!file || representation > PG_READ_STORED)
+	if (!file || !file->source || representation > PG_READ_STORED)
 		return pg_result(PG_INVALID, error);
 	if (file->source->recovery_required)
 		return pg_result(PG_RECOVERY_REQUIRED, error);
