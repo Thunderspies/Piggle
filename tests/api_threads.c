@@ -19,6 +19,7 @@ struct work {
 	int result;
 	int stale;
 	int late;
+	pg_reader *final_reader;
 };
 
 static int readable(pg_status status)
@@ -30,6 +31,8 @@ static int readable(pg_status status)
 static int traverse(struct work *work)
 {
 	pg_error error;
+	if (work->final_reader)
+		return pg_reader_close(&work->final_reader, &error) != PG_OK;
 
 	/* Final source release synchronizes the shared context registry. */
 	STATUS(pg_file_close(&work->retired, &error), PG_OK);
@@ -349,6 +352,29 @@ static int exercise(uint32_t format, uint32_t mode)
 
 int main(int argc, char **argv)
 {
+	if (argc == 2 && !strcmp(argv[1], "context_close")) {
+		CHECK(!put_bytes("final-reader", "old", 3));
+		for (unsigned i = 0; i < 512; i++) {
+			pg_context *context = NULL;
+			pg_error error;
+			struct work work = {0};
+			test_thread thread;
+			pg_status status;
+
+			STATUS(pg_context_open(&context, &error), PG_OK);
+			STATUS(pg_reader_open_native(context, "final-reader",
+				       &work.final_reader, &error),
+				PG_OK);
+			CHECK(!start(&thread, &work));
+			do {
+				status = pg_context_close(&context, &error);
+			} while (status == PG_BUSY);
+			CHECK(status == PG_OK && !context);
+			CHECK(!join(thread, &work));
+		}
+		CHECK(!remove("final-reader"));
+		return 0;
+	}
 	CHECK(argc == 3);
 	uint32_t format = !strcmp(argv[1], "loose") ? PG_LOOSE :
 		!strcmp(argv[1], "pigg") ? PG_PIGG2 : PG_HOGG10;
