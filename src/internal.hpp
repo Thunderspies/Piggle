@@ -75,7 +75,18 @@ struct pg_context {
 	uint64_t next_id;
 	size_t children;
 	pg_source *sources;
+#ifdef _WIN32
+	CRITICAL_SECTION coordination;
+#else
+	pthread_mutex_t coordination;
+#endif
 };
+
+/* Coordinate cached views and references before taking source locks. */
+pg_status pg_context_sync_create(pg_context *context);
+void pg_context_sync_destroy(pg_context *context);
+void pg_context_lock(pg_context *context);
+void pg_context_unlock(pg_context *context);
 
 static inline size_t pg_context_children(const pg_context *context)
 {
@@ -278,10 +289,8 @@ struct pg_tree {
 	int closed;
 #ifdef _WIN32
 	DWORD control_thread;
-	CRITICAL_SECTION scope_lock;
 #else
 	pthread_t control_thread;
-	pthread_mutex_t scope_lock;
 #endif
 };
 

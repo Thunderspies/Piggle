@@ -94,6 +94,7 @@ PG_API pg_status PG_CALL pg_file_inspect(pg_file *file, pg_file_info *out,
 		pg_error *error);
 /* Immediate next owned file from captured order; END clears out. NOMEM
  * leaves cursor position unchanged. Returned file outlives cursor close.
+ * Workers allowed; serialize access to this cursor.
  */
 PG_API pg_status PG_CALL pg_cursor_next(pg_cursor *cursor, pg_file **out,
 		pg_error *error);
@@ -101,6 +102,7 @@ PG_API pg_status PG_CALL pg_cursor_next(pg_cursor *cursor, pg_file **out,
 /* Verify a captured copy by decoding and checking its profile-selected digest.
  * No stored digest -> NO_CHECKSUM. No reader position or view changes.
  * Changed copy -> STALE; malformed stream -> CORRUPT; mismatch -> CHECKSUM.
+ * Workers allowed; serialize access to this selected file.
  */
 PG_API pg_status PG_CALL pg_file_verify(
 		pg_file *file,
@@ -118,7 +120,7 @@ PG_API pg_status PG_CALL pg_file_delete(
 /* Release one owned reference; never commit or delete backing data.
  * Address required; NULL *handle succeeds. Accepted close clears it;
  * rejection leaves it owned. Cleanup may block and report IO, but the
- * reference stays consumed.
+ * reference stays consumed. Workers allowed; serialize this owned reference.
  */
 PG_API pg_status PG_CALL pg_file_close(
 		pg_file **file,
@@ -127,7 +129,7 @@ PG_API pg_status PG_CALL pg_file_close(
 /* Release one owned reference; never commit or delete backing data.
  * Address required; NULL *handle succeeds. Accepted close clears it;
  * rejection leaves it owned. Cleanup may block and report IO, but the
- * reference stays consumed.
+ * reference stays consumed. Workers allowed; serialize this owned reference.
  */
 PG_API pg_status PG_CALL pg_cursor_close(
 		pg_cursor **cursor,

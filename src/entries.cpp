@@ -337,7 +337,7 @@ done:
 	return pg_result(status, error);
 }
 
-PG_API pg_status PG_CALL pg_source_entries(pg_source *source,
+static pg_status PG_CALL pg_source_entries_coordinated(pg_source *source,
 		const char *prefix, uint32_t flags, pg_entry_cursor **out,
 		pg_error *error)
 {
@@ -359,7 +359,21 @@ PG_API pg_status PG_CALL pg_source_entries(pg_source *source,
 	return status;
 }
 
-PG_API pg_status PG_CALL pg_tree_entries(pg_tree *tree,
+PG_API pg_status PG_CALL pg_source_entries(pg_source *source,
+		const char *prefix, uint32_t flags, pg_entry_cursor **out,
+		pg_error *error)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_source_entries_coordinated(source, prefix,
+		flags, out, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
+static pg_status PG_CALL pg_tree_entries_coordinated(pg_tree *tree,
 		const char *prefix, uint32_t flags, pg_entry_cursor **out,
 		pg_error *error)
 {
@@ -381,23 +395,30 @@ PG_API pg_status PG_CALL pg_tree_entries(pg_tree *tree,
 	return status;
 }
 
+PG_API pg_status PG_CALL pg_tree_entries(pg_tree *tree,
+		const char *prefix, uint32_t flags, pg_entry_cursor **out,
+		pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_entries_coordinated(tree, prefix, flags,
+		out, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 PG_API pg_status PG_CALL pg_entry_cursor_next(pg_entry_cursor *cursor,
 		pg_entry_info *out, pg_file **file, pg_error *error)
 {
-	/* Check source controls before transferring captured selection. */
+	/* Transfer captured selection without consulting live source state. */
 	if (out)
 		memset(out, 0, sizeof(*out));
 	if (file)
 		*file = NULL;
 	if (!cursor || !out || !file)
 		return pg_result(PG_INVALID, error);
-	for (size_t i = 0; i < cursor->source_count; i++) {
-		pg_status status = pg_source_control_status(cursor->sources[i],
-			0);
-
-		if (status != PG_OK)
-			return pg_result(status, error);
-	}
 	if (cursor->position == cursor->count)
 		return pg_result(PG_END, error);
 	pg_entry_item *item = &cursor->items[cursor->position++];
@@ -408,23 +429,17 @@ PG_API pg_status PG_CALL pg_entry_cursor_next(pg_entry_cursor *cursor,
 	return pg_result(PG_OK, error);
 }
 
-PG_API pg_status PG_CALL pg_entry_cursor_close(pg_entry_cursor **cursor,
+static pg_status PG_CALL pg_entry_cursor_close_coordinated(
+		pg_entry_cursor **cursor,
 		pg_error *error)
 {
-	/* Check controls, consume ownership, release all captured resources. */
+	/* Consume ownership and release all captured resources. */
 	if (!cursor)
 		return pg_result(PG_INVALID, error);
 	if (!*cursor)
 		return pg_result(PG_OK, error);
 	pg_entry_cursor *owned = *cursor;
 
-	for (size_t i = 0; i < owned->source_count; i++) {
-		pg_status status = pg_source_control_status(owned->sources[i],
-			0);
-
-		if (status != PG_OK)
-			return pg_result(status, error);
-	}
 	*cursor = NULL;
 	pg_status status = PG_OK;
 	int native_code = 0;
@@ -446,6 +461,18 @@ PG_API pg_status PG_CALL pg_entry_cursor_close(pg_entry_cursor **cursor,
 	pg_context_child_drop(owned->context);
 	free(owned);
 	return pg_native_result(status, native_code, error);
+}
+
+PG_API pg_status PG_CALL pg_entry_cursor_close(pg_entry_cursor **cursor,
+		pg_error *error)
+{
+	pg_context *context = cursor && *cursor ? (*cursor)->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_entry_cursor_close_coordinated(cursor, error);
+
+	pg_context_unlock(context);
+	return status;
 }
 
 /* Capture directory metadata in internal cursors used by the visible feed. */

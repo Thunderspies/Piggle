@@ -185,13 +185,28 @@ all writers. Blocking pack and unpack helpers compose these same primitives.
 
 ## Threads and callbacks
 
-A tree has one control thread, selected by create or ordered open. Source
-and tree lookup, enumeration, subtree request, attachment, rescan, watch,
-poll and tree cleanup use that thread. An attached source's control calls
-use the tree thread. Standalone source control and builder access require
-serialization. Independent readers can be read and closed on workers with
-per-handle serialization; writer and selected-file access follow their
-respective ownership rules. Calls sharing a handle are never concurrent.
+A tree has one control thread, selected by create or ordered open. Subtree
+request/discovery, attachment, rescan, management, watch, poll, publication,
+export, pack/unpack and tree cleanup use that thread. An attached source's
+control calls use the tree thread. Standalone source control and builder access
+require serialization.
+
+Workers may look up files, capture file or entry listings, inspect trees and
+sources, acquire attached source references, open readers and read or verify
+selected files. Named reader and whole-file read helpers also accept workers.
+Live traversal and control operations serialize internally within each context;
+long discovery or reconciliation can delay other traversal in that context.
+Each lookup or listing captures one selection or metadata view. Separate calls
+do not form a transaction, including attachment-order enumeration.
+
+Independent cursors may be advanced and closed on workers, including empty or
+exhausted cursors. Workers may close owned file, reader and source references.
+Captured iteration and reader streaming do not hold the context coordination
+lock; existing source-level read/publication synchronization still applies.
+Serialize access to each cursor, file, reader, writer, output slot and owned
+reference. Live tree read calls may overlap. Stop or join direct tree users
+before tree close, and serialize context close with all dependent operations.
+Retained results survive tree close. Relative native paths require stable cwd.
 
 Callbacks execute synchronously during `pg_tree_poll`, after reconciliation.
 They may inspect metadata, find/read named files, open readers, advance
@@ -323,8 +338,8 @@ Failure closes private resources, leaves the output NULL and preserves the
 first error. The captured identity, available digest verification, stored/logical
 representation and stale behavior are identical to the selected-file opener.
 There is no retry or second lookup. The name and output slot borrow through
-return; they need not survive the returned reader. Named open follows its
-source/tree control thread. After open, reader read/close can run on a worker
+return; they need not survive the returned reader. Named open accepts workers.
+After open, reader read/close can run on a worker
 with per-handle serialization, just like an explicitly selected reader.
 
 

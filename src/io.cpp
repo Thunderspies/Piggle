@@ -1064,11 +1064,6 @@ static pg_status pg_reader_open_locked(
 		(*out)->source = file->source;
 		pg_atomic_increment(&file->source->live_readers);
 		pg_context_child_drop((*out)->context);
-		status = pg_reader_track_tree(file, *out, error);
-		if (status != PG_OK) {
-			pg_reader_close(out, NULL);
-			return status;
-		}
 		return pg_result(PG_OK, error);
 	}
 	int found_copy = 0;
@@ -1171,11 +1166,6 @@ static pg_status pg_reader_open_locked(
 	reader->info.mtime = file->info.mtime;
 	reader->info.encoding = representation == PG_READ_STORED ?
 		file->info.encoding : (uint32_t)PG_LOGICAL;
-	status = pg_reader_track_tree(file, reader, error);
-	if (status != PG_OK) {
-		pg_reader_close(&reader, NULL);
-		return status;
-	}
 	*out = reader;
 	return pg_result(PG_OK, error);
 }
@@ -1449,7 +1439,7 @@ PG_API pg_status PG_CALL pg_reader_tell(pg_reader *reader,
 /* Accept a null owned handle as a no-op. */
 /* Finish reader cleanup and remove its exact-name watch scope. */
 /* Release references and clear the pointer once close is accepted. */
-PG_API pg_status PG_CALL pg_reader_close(
+static pg_status PG_CALL pg_reader_close_coordinated(
 		pg_reader **reader,
 		pg_error *error)
 {
@@ -1498,6 +1488,19 @@ PG_API pg_status PG_CALL pg_reader_close(
 	free(owned->native_path);
 	free(owned);
 	return pg_native_result(closed ? PG_IO : PG_OK, code, error);
+}
+
+PG_API pg_status PG_CALL pg_reader_close(
+		pg_reader **reader,
+		pg_error *error)
+{
+	pg_context *context = reader && *reader ? (*reader)->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_reader_close_coordinated(reader, error);
+
+	pg_context_unlock(context);
+	return status;
 }
 
 static pg_status pg_writer_open_archive_source(pg_source *source,
@@ -1586,7 +1589,7 @@ static pg_status pg_writer_open_archive_source(pg_source *source,
 }
 
 /* Open a staged writer for one source path. */
-PG_API pg_status PG_CALL pg_writer_open_source(
+static pg_status PG_CALL pg_writer_open_source_coordinated(
 		pg_source *destination,
 		const char *name,
 		const pg_write_options *options,
@@ -1678,8 +1681,27 @@ PG_API pg_status PG_CALL pg_writer_open_source(
 	return status;
 }
 
+PG_API pg_status PG_CALL pg_writer_open_source(
+		pg_source *destination,
+		const char *name,
+		const pg_write_options *options,
+		pg_writer **out,
+		pg_error *error)
+{
+	pg_context *context = destination ? destination->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(destination);
+	pg_status status = pg_writer_open_source_coordinated(destination,
+		name, options, out, error);
+
+	pg_source_unlock(destination);
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Stage a replacement for one captured loose-file identity. */
-PG_API pg_status PG_CALL pg_writer_open_file(
+static pg_status PG_CALL pg_writer_open_file_coordinated(
 		pg_file *file,
 		const pg_write_options *options,
 		pg_writer **out,
@@ -1727,6 +1749,24 @@ PG_API pg_status PG_CALL pg_writer_open_file(
 		return pg_result(PG_STALE, error);
 	}
 	return pg_result(PG_OK, error);
+}
+
+PG_API pg_status PG_CALL pg_writer_open_file(
+		pg_file *file,
+		const pg_write_options *options,
+		pg_writer **out,
+		pg_error *error)
+{
+	pg_context *context = file ? file->source->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(file ? file->source : NULL);
+	pg_status status = pg_writer_open_file_coordinated(file, options, out,
+		error);
+
+	pg_source_unlock(file ? file->source : NULL);
+	pg_context_unlock(context);
+	return status;
 }
 
 /* Validate builder state, unique name and known input length. */
@@ -1844,7 +1884,8 @@ static pg_status pg_writer_native_stage(pg_writer *writer,
 }
 
 /* Validate options and aliases, then retain a pinned native parent. */
-pg_status pg_writer_open_native_for_source(pg_context *context,
+static pg_status pg_writer_open_native_for_source_coordinated(
+		pg_context *context,
 		pg_source *allowed_source,
 		const char *native_path,
 		const pg_write_options *options,
@@ -1960,6 +2001,23 @@ cleanup_native:
 	return pg_native_result(status, native_code, error);
 }
 
+pg_status pg_writer_open_native_for_source(pg_context *context,
+		pg_source *allowed_source,
+		const char *native_path,
+		const pg_write_options *options,
+		uint32_t flags,
+		pg_writer **out,
+		pg_error *error)
+{
+	pg_context_lock(context);
+	pg_status status = pg_writer_open_native_for_source_coordinated(
+		context, allowed_source, native_path, options, flags, out,
+		error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 PG_API pg_status PG_CALL pg_writer_open_native(
 		pg_context *context, const char *native_path,
 		const pg_write_options *options, uint32_t flags,
@@ -1975,7 +2033,7 @@ PG_API pg_status PG_CALL pg_writer_open_native(
 }
 
 /* Pin an existing directory and preflight every captured output. */
-PG_API pg_status PG_CALL pg_unpack_target_open(
+static pg_status PG_CALL pg_unpack_target_open_coordinated(
 		pg_cursor *cursor, const char *directory, uint32_t flags,
 		pg_unpack_target **out, pg_error *error)
 {
@@ -2092,6 +2150,20 @@ target_fail:
 	free(target->root_path);
 	free(target);
 	return pg_native_result(status, native_code, error);
+}
+
+PG_API pg_status PG_CALL pg_unpack_target_open(
+		pg_cursor *cursor, const char *directory, uint32_t flags,
+		pg_unpack_target **out, pg_error *error)
+{
+	pg_context *context = cursor ? cursor->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_unpack_target_open_coordinated(cursor,
+		directory, flags, out, error);
+
+	pg_context_unlock(context);
+	return status;
 }
 
 /* Open a staged native writer for one captured unpack selection. */
@@ -2252,7 +2324,7 @@ PG_API pg_status PG_CALL pg_writer_write(
 /* Check exact lengths, codec, digest and staged output. */
 /* Publish replacement or install private builder entry. */
 /* Report publication effects and make writer close-only. */
-PG_API pg_status PG_CALL pg_writer_finish(
+static pg_status PG_CALL pg_writer_finish_coordinated(
 		pg_writer *writer,
 		pg_error *error)
 {
@@ -2260,6 +2332,11 @@ PG_API pg_status PG_CALL pg_writer_finish(
 
 	if (!writer || writer->state != PG_WRITER_ACTIVE)
 		return pg_result(PG_INVALID, error);
+	if (writer->source) {
+		status = pg_source_control_status(writer->source, 1);
+		if (status != PG_OK)
+			return pg_result(status, error);
+	}
 	writer->state = PG_WRITER_CLOSE_ONLY;
 	int native_code = 0;
 	pg_status cause = PG_OK;
@@ -2309,11 +2386,24 @@ PG_API pg_status PG_CALL pg_writer_finish(
 	return status;
 }
 
+PG_API pg_status PG_CALL pg_writer_finish(
+		pg_writer *writer,
+		pg_error *error)
+{
+	pg_context *context = writer ? writer->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_writer_finish_coordinated(writer, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Accept a null owned handle as a no-op. */
 /* Discard unfinished staging without publishing content. */
 /* Release parent and live builder-writer reference. */
 /* Clear the owned pointer once close is accepted. */
-PG_API pg_status PG_CALL pg_writer_close(
+static pg_status PG_CALL pg_writer_close_coordinated(
 		pg_writer **writer,
 		pg_error *error)
 {
@@ -2383,9 +2473,23 @@ PG_API pg_status PG_CALL pg_writer_close(
 	return pg_native_result(closed ? PG_IO : PG_OK, code, error);
 }
 
+PG_API pg_status PG_CALL pg_writer_close(
+		pg_writer **writer,
+		pg_error *error)
+{
+	pg_context *context = writer && *writer ? (*writer)->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_writer_close_coordinated(writer, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 } /* extern "C" */
 
-pg_status pg_reader_open(pg_file *file, uint32_t representation,
+static pg_status pg_reader_open_coordinated(
+		pg_file *file, uint32_t representation,
 		pg_reader **out, pg_error *error)
 {
 	pg_source *source = file ? file->source : NULL;
@@ -2395,6 +2499,25 @@ pg_status pg_reader_open(pg_file *file, uint32_t representation,
 		error);
 
 	pg_source_unlock(source);
+	/* Tree reconciliation can visit other sources; hold no source lock. */
+	if (status == PG_OK) {
+		status = pg_reader_track_tree(file, *out, error);
+		if (status != PG_OK)
+			pg_reader_close(out, NULL);
+	}
+	return status;
+}
+
+pg_status pg_reader_open(pg_file *file, uint32_t representation,
+		pg_reader **out, pg_error *error)
+{
+	pg_context *context = file ? file->source->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_reader_open_coordinated(file, representation,
+		out, error);
+
+	pg_context_unlock(context);
 	return status;
 }
 

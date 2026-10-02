@@ -3,64 +3,33 @@
 
 pg_status pg_tree_retain(pg_tree *tree)
 {
-	pg_status status = PG_OK;
+	size_t refs = pg_atomic_load(&tree->refs);
 
-#ifdef _WIN32
-	EnterCriticalSection(&tree->scope_lock);
-#else
-	pthread_mutex_lock(&tree->scope_lock);
-#endif
-	if (tree->refs == SIZE_MAX)
-		status = PG_LIMIT;
-	else
-		tree->refs++;
-#ifdef _WIN32
-	LeaveCriticalSection(&tree->scope_lock);
-#else
-	pthread_mutex_unlock(&tree->scope_lock);
-#endif
-	return status;
+	do {
+		if (refs == SIZE_MAX)
+			return PG_LIMIT;
+	} while (!pg_atomic_compare_exchange(&tree->refs, &refs, refs + 1));
+	return PG_OK;
 }
 
 void pg_tree_release(pg_tree *tree)
 {
-	int last;
-
-#ifdef _WIN32
-	EnterCriticalSection(&tree->scope_lock);
-#else
-	pthread_mutex_lock(&tree->scope_lock);
-#endif
-	last = !--tree->refs;
-#ifdef _WIN32
-	LeaveCriticalSection(&tree->scope_lock);
-	if (last)
-		DeleteCriticalSection(&tree->scope_lock);
-#else
-	pthread_mutex_unlock(&tree->scope_lock);
-	if (last)
-		pthread_mutex_destroy(&tree->scope_lock);
-#endif
-	if (last)
+	if (!pg_atomic_decrement(&tree->refs)) {
+		/* Retained selections and readers keep this context alive
+		 * after the public tree reference has been closed. */
+		pg_context_child_drop(tree->context);
 		free(tree);
+	}
 }
 
 void pg_tree_scope_lock(pg_tree *tree)
 {
-#ifdef _WIN32
-	EnterCriticalSection(&tree->scope_lock);
-#else
-	pthread_mutex_lock(&tree->scope_lock);
-#endif
+	pg_context_lock(tree->context);
 }
 
 void pg_tree_scope_unlock(pg_tree *tree)
 {
-#ifdef _WIN32
-	LeaveCriticalSection(&tree->scope_lock);
-#else
-	pthread_mutex_unlock(&tree->scope_lock);
-#endif
+	pg_context_unlock(tree->context);
 }
 
 int pg_tree_on_control_thread(const pg_tree *tree)
@@ -75,9 +44,11 @@ int pg_tree_on_control_thread(const pg_tree *tree)
 pg_status pg_tree_control_status(const pg_tree *tree,
 		int mutation)
 {
+	if (!mutation)
+		return PG_OK;
 	if (!pg_tree_on_control_thread(tree))
 		return PG_BUSY;
-	if (mutation && tree->polling && !tree->reconciling)
+	if (tree->polling && !tree->reconciling)
 		return PG_REENTRANT;
 	return PG_OK;
 }
@@ -85,9 +56,11 @@ pg_status pg_tree_control_status(const pg_tree *tree,
 pg_status pg_source_control_status(const pg_source *source,
 		int mutation)
 {
-	if (source->attached && mutation &&
-	    source->attached->reconciling &&
-	    pg_tree_on_control_thread(source->attached))
+	if (!mutation)
+		return PG_OK;
+	/* Private reconciliation runs under context coordination on workers
+	 * too; public mutation entrypoints retain their control checks. */
+	if (source->attached && source->attached->reconciling)
 		return PG_OK;
 	return source->attached ?
 		pg_tree_control_status(source->attached, mutation) : PG_OK;
@@ -101,7 +74,8 @@ static pg_status pg_tree_sources_save_mode(pg_tree *tree,
 		const char *prefix = NULL, int recursive = 1);
 
 /* Allocate an empty tree and retain its context. */
-PG_API pg_status PG_CALL pg_tree_create(pg_context *context, pg_tree **out,
+static pg_status PG_CALL pg_tree_create_coordinated(
+		pg_context *context, pg_tree **out,
 		pg_error *error)
 {
 	pg_tree *tree;
@@ -121,23 +95,8 @@ PG_API pg_status PG_CALL pg_tree_create(pg_context *context, pg_tree **out,
 	tree->native_fd = -1;
 	tree->refs = 1;
 #ifdef _WIN32
-	InitializeCriticalSection(&tree->scope_lock);
 	tree->control_thread = GetCurrentThreadId();
 #else
-	pthread_mutexattr_t attributes;
-
-	if (pthread_mutexattr_init(&attributes)) {
-		free(tree);
-		return pg_result(PG_IO, error);
-	}
-	if (pthread_mutexattr_settype(&attributes,
-		PTHREAD_MUTEX_RECURSIVE) ||
-	    pthread_mutex_init(&tree->scope_lock, &attributes)) {
-		pthread_mutexattr_destroy(&attributes);
-		free(tree);
-		return pg_result(PG_IO, error);
-	}
-	pthread_mutexattr_destroy(&attributes);
 	tree->control_thread = pthread_self();
 #endif
 	pg_context_child_add(context);
@@ -145,8 +104,19 @@ PG_API pg_status PG_CALL pg_tree_create(pg_context *context, pg_tree **out,
 	return pg_result(PG_OK, error);
 }
 
+PG_API pg_status PG_CALL pg_tree_create(pg_context *context, pg_tree **out,
+		pg_error *error)
+{
+	pg_context_lock(context);
+	pg_status status = pg_tree_create_coordinated(context, out, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Copy current attachment count and watch mode. */
-PG_API pg_status PG_CALL pg_tree_inspect(pg_tree *tree, pg_tree_info *out,
+static pg_status PG_CALL pg_tree_inspect_coordinated(
+		pg_tree *tree, pg_tree_info *out,
 		pg_error *error)
 {
 	if (out)
@@ -156,6 +126,18 @@ PG_API pg_status PG_CALL pg_tree_inspect(pg_tree *tree, pg_tree_info *out,
 	out->source_count = tree->count;
 	out->watch_mode = tree->watch_mode;
 	return pg_result(PG_OK, error);
+}
+
+PG_API pg_status PG_CALL pg_tree_inspect(pg_tree *tree, pg_tree_info *out,
+		pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_inspect_coordinated(tree, out, error);
+
+	pg_context_unlock(context);
+	return status;
 }
 
 /* Open and attach sources in caller order, unwinding a failed build. */
@@ -226,7 +208,7 @@ static int pg_tree_path_contains(const char *root, const char *path)
 }
 
 /* Attach one source after existing lower-precedence sources. */
-PG_API pg_status PG_CALL pg_tree_attach(
+static pg_status PG_CALL pg_tree_attach_coordinated(
 		pg_tree *tree,
 		pg_source *source,
 		pg_error *error)
@@ -324,8 +306,22 @@ PG_API pg_status PG_CALL pg_tree_attach(
 	return pg_result(PG_OK, error);
 }
 
+PG_API pg_status PG_CALL pg_tree_attach(
+		pg_tree *tree,
+		pg_source *source,
+		pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_attach_coordinated(tree, source, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Remove one source without invalidating retained selections. */
-PG_API pg_status PG_CALL pg_tree_detach(
+static pg_status PG_CALL pg_tree_detach_coordinated(
 		pg_tree *tree,
 		pg_source *source,
 		pg_error *error)
@@ -366,8 +362,22 @@ PG_API pg_status PG_CALL pg_tree_detach(
 	return pg_native_result(status, native_code, error);
 }
 
+PG_API pg_status PG_CALL pg_tree_detach(
+		pg_tree *tree,
+		pg_source *source,
+		pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_detach_coordinated(tree, source, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Return an owned reference to the indexed attachment. */
-PG_API pg_status PG_CALL pg_tree_source(pg_tree *tree, size_t index,
+static pg_status PG_CALL pg_tree_source_coordinated(pg_tree *tree, size_t index,
 		pg_source **out, pg_error *error)
 {
 	pg_status status;
@@ -387,6 +397,18 @@ PG_API pg_status PG_CALL pg_tree_source(pg_tree *tree, size_t index,
 		return pg_result(status, error);
 	*out = tree->sources[index];
 	return pg_result(PG_OK, error);
+}
+
+PG_API pg_status PG_CALL pg_tree_source(pg_tree *tree, size_t index,
+		pg_source **out, pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_source_coordinated(tree, index, out, error);
+
+	pg_context_unlock(context);
+	return status;
 }
 
 /* Read one selected overlay file and preserve the first failure. */
@@ -451,7 +473,8 @@ PG_API pg_status PG_CALL pg_tree_read_all_alloc(pg_tree *tree,
 }
 
 /* Export one overlay selection and preserve its first outcome. */
-PG_API pg_status PG_CALL pg_tree_export(pg_tree *tree, const char *name,
+static pg_status PG_CALL pg_tree_export_coordinated(
+		pg_tree *tree, const char *name,
 		const char *native_output, uint32_t flags,
 		pg_error *error)
 {
@@ -462,6 +485,9 @@ PG_API pg_status PG_CALL pg_tree_export(pg_tree *tree, const char *name,
 	if (!tree || !name || !native_output || !*native_output ||
 	    (flags & ~PG_OVERWRITE))
 		return pg_result(PG_INVALID, error);
+	status = pg_tree_control_status(tree, 1);
+	if (status != PG_OK)
+		return pg_result(status, error);
 	status = pg_tree_find(tree, name, &file, &work_error);
 	if (status != PG_OK) {
 		if (error)
@@ -479,6 +505,20 @@ PG_API pg_status PG_CALL pg_tree_export(pg_tree *tree, const char *name,
 	}
 	if (error)
 		*error = work_error;
+	return status;
+}
+
+PG_API pg_status PG_CALL pg_tree_export(pg_tree *tree, const char *name,
+		const char *native_output, uint32_t flags,
+		pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_export_coordinated(tree, name,
+		native_output, flags, error);
+
+	pg_context_unlock(context);
 	return status;
 }
 
@@ -617,7 +657,8 @@ static pg_status pg_tree_find_canonical(
 	return pg_result(PG_OK, error);
 }
 
-PG_API pg_status PG_CALL pg_tree_find(pg_tree *tree, const char *name,
+static pg_status PG_CALL pg_tree_find_coordinated(
+		pg_tree *tree, const char *name,
 		pg_file **out, pg_error *error)
 {
 	size_t required = 0;
@@ -651,6 +692,18 @@ PG_API pg_status PG_CALL pg_tree_find(pg_tree *tree, const char *name,
 		}
 	}
 	free(canonical);
+	return status;
+}
+
+PG_API pg_status PG_CALL pg_tree_find(pg_tree *tree, const char *name,
+		pg_file **out, pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_find_coordinated(tree, name, out, error);
+
+	pg_context_unlock(context);
 	return status;
 }
 
@@ -993,7 +1046,8 @@ static pg_status pg_tree_prefix_check(pg_tree *tree, const char *prefix)
 }
 
 /* Merge captured source selections without per-file lookups. */
-pg_status pg_tree_files_depth(pg_tree *tree, const char *prefix,
+static pg_status pg_tree_files_depth_coordinated(
+		pg_tree *tree, const char *prefix,
 		int recursive, pg_cursor **out, pg_error *error)
 {
 	pg_cursor *merged;
@@ -1176,8 +1230,21 @@ fail_early:
 	return pg_result(status, error);
 }
 
+pg_status pg_tree_files_depth(pg_tree *tree, const char *prefix,
+		int recursive, pg_cursor **out, pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_files_depth_coordinated(tree, prefix,
+		recursive, out, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Refresh and retain a subtree as an explicit tree watch scope. */
-pg_status pg_tree_discover(pg_tree *tree, const char *prefix,
+static pg_status pg_tree_discover_coordinated(pg_tree *tree, const char *prefix,
 		uint32_t depth, pg_error *error)
 {
 	pg_tree_scope *scope = NULL;
@@ -1266,6 +1333,19 @@ request_done:
 	pg_cursor_close(&snapshot, NULL);
 	free(canonical);
 	return status == PG_OK ? pg_result(PG_OK, error) : status;
+}
+
+pg_status pg_tree_discover(pg_tree *tree, const char *prefix,
+		uint32_t depth, pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_discover_coordinated(tree, prefix, depth,
+		error);
+
+	pg_context_unlock(context);
+	return status;
 }
 
 PG_API pg_status PG_CALL pg_tree_request_subtree(pg_tree *tree,
@@ -1463,6 +1543,7 @@ void pg_tree_sources_restore(pg_tree *tree,
 
 		if (!saved[i].captured)
 			continue;
+		pg_source_lock(source);
 		pg_source_index_clear(source);
 		pg_source_record **at = &source->records;
 
@@ -1501,6 +1582,7 @@ void pg_tree_sources_restore(pg_tree *tree,
 		saved[i].exact_requests = NULL;
 		saved[i].prefix_requests = NULL;
 		saved[i].shallow_requests = NULL;
+		pg_source_unlock(source);
 	}
 }
 
@@ -1518,7 +1600,7 @@ static pg_status pg_tree_refresh_scope(pg_source *source, pg_tree_scope *scope,
 }
 
 /* Refresh requested tree scopes or all source observations. */
-static pg_status pg_tree_rescan_mode(pg_tree *tree, pg_error *error,
+static pg_status pg_tree_rescan_mode_coordinated(pg_tree *tree, pg_error *error,
 		int scopes_only)
 {
 	pg_status status;
@@ -1527,7 +1609,8 @@ static pg_status pg_tree_rescan_mode(pg_tree *tree, pg_error *error,
 
 	if (!tree)
 		return pg_result(PG_INVALID, error);
-	status = pg_tree_control_status(tree, 1);
+	status = scopes_only && tree->reconciling ? PG_OK :
+		pg_tree_control_status(tree, 1);
 	if (status != PG_OK)
 		return pg_result(status, error);
 	status = pg_tree_sources_save(tree, &saved);
@@ -1562,6 +1645,19 @@ rescan_done:
 	return status == PG_OK ? pg_result(PG_OK, error) : status;
 }
 
+static pg_status pg_tree_rescan_mode(pg_tree *tree, pg_error *error,
+		int scopes_only)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_rescan_mode_coordinated(tree, error,
+		scopes_only);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 pg_status pg_tree_rescan_scopes(pg_tree *tree, pg_error *error)
 {
 	return pg_tree_rescan_mode(tree, error, 1);
@@ -1573,7 +1669,7 @@ PG_API pg_status PG_CALL pg_tree_rescan(pg_tree *tree, pg_error *error)
 }
 
 /* Release attachments and the context reference. */
-PG_API pg_status PG_CALL pg_tree_close(
+static pg_status PG_CALL pg_tree_close_coordinated(
 		pg_tree **tree,
 		pg_error *error)
 {
@@ -1615,10 +1711,22 @@ PG_API pg_status PG_CALL pg_tree_close(
 			native_code = code;
 		}
 	}
-	pg_context_child_drop(owned->context);
 	free(owned->sources);
 	pg_tree_release(owned);
 	return pg_native_result(status, native_code, error);
+}
+
+PG_API pg_status PG_CALL pg_tree_close(
+		pg_tree **tree,
+		pg_error *error)
+{
+	pg_context *context = tree && *tree ? (*tree)->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_close_coordinated(tree, error);
+
+	pg_context_unlock(context);
+	return status;
 }
 
 } /* extern "C" */

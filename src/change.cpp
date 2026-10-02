@@ -870,7 +870,7 @@ pg_status pg_tree_native_reconcile(pg_tree *tree, pg_error *error)
 extern "C" {
 
 /* Enable one watch mode after refreshing requested baselines. */
-PG_API pg_status PG_CALL pg_tree_watch(pg_tree *tree, uint32_t mode,
+static pg_status PG_CALL pg_tree_watch_coordinated(pg_tree *tree, uint32_t mode,
 		pg_error *error)
 {
 	pg_tree_scope *scope;
@@ -1022,8 +1022,21 @@ watch_failed:
 	return pg_native_result(status, native_code, error);
 }
 
+PG_API pg_status PG_CALL pg_tree_watch(pg_tree *tree, uint32_t mode,
+		pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_watch_coordinated(tree, mode, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Stop observation while retaining attachment and request state. */
-PG_API pg_status PG_CALL pg_tree_unwatch(pg_tree *tree, pg_error *error)
+static pg_status PG_CALL pg_tree_unwatch_coordinated(
+		pg_tree *tree, pg_error *error)
 {
 	if (!tree)
 		return pg_result(PG_INVALID, error);
@@ -1053,73 +1066,80 @@ PG_API pg_status PG_CALL pg_tree_unwatch(pg_tree *tree, pg_error *error)
 	return pg_result(PG_OK, error);
 }
 
+PG_API pg_status PG_CALL pg_tree_unwatch(pg_tree *tree, pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_unwatch_coordinated(tree, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Compare one finite set of requested scopes and deliver visible changes. */
 PG_API pg_status PG_CALL pg_tree_poll(pg_tree *tree,
 		const pg_observer *observer, pg_error *error)
 {
 	pg_status status = PG_OK;
+	pg_tree_batch *delivery = NULL, *cut = NULL;
+	int loss_cut = 0;
 
-	if (!tree || !observer || !tree->watch_mode)
+	if (!tree || !observer)
 		return pg_result(PG_INVALID, error);
-	status = pg_tree_control_status(tree, 0);
-	if (status != PG_OK)
+	pg_context_lock(tree->context);
+	if (!tree->watch_mode) {
+		pg_context_unlock(tree->context);
+		return pg_result(PG_INVALID, error);
+	}
+	status = pg_tree_control_status(tree, 1);
+	if (status != PG_OK) {
+		pg_context_unlock(tree->context);
 		return pg_result(status, error);
-	if (tree->polling)
-		return pg_result(PG_REENTRANT, error);
-	pg_tree_scope_lock(tree);
+	}
 	tree->polling = 1;
-	pg_tree_scope_unlock(tree);
+	pg_result(PG_OK, error);
 	status = pg_tree_native_reconcile(tree, error);
 	if (status == PG_OK && tree->watch_mode == PG_WATCH_SCAN) {
 		tree->reconciling = 1;
 		status = pg_tree_rescan_scopes(tree, error);
 		tree->reconciling = 0;
 	}
-	if (status != PG_OK) {
-		pg_tree_scope_lock(tree);
-		tree->polling = 0;
-		pg_tree_scope_unlock(tree);
-		pg_tree_reader_scope_sweep(tree);
-		return pg_result(status, error);
-	}
+	if (status != PG_OK)
+		goto poll_done;
 	if (tree->watch_mode == PG_WATCH_SCAN)
 		status = pg_tree_queue_changes(tree, error);
-	if (status != PG_OK) {
-		pg_tree_scope_lock(tree);
-		tree->polling = 0;
-		pg_tree_scope_unlock(tree);
-		pg_tree_reader_scope_sweep(tree);
-		return status;
-	}
-	pg_tree_batch *cut = tree->pending_tail;
-	int loss_cut = tree->loss_pending;
-
+	if (status != PG_OK)
+		goto poll_done;
+	/* Own this poll's reports while workers queue later reports
+	 * separately. */
+	delivery = tree->pending_head;
+	cut = tree->pending_tail;
+	loss_cut = tree->loss_pending;
+	tree->pending_head = tree->pending_tail = NULL;
 	tree->loss_pending = 0;
-	while (tree->pending_head) {
-		pg_tree_batch *batch = tree->pending_head;
+	pg_context_unlock(tree->context);
+	while (delivery) {
+		pg_tree_batch *batch = delivery;
 
 		status = pg_change_deliver_batch(tree, batch, observer);
 		if (status != PG_OK) {
-			if (!tree->loss_pending)
-				tree->loss_pending = loss_cut;
-			pg_tree_scope_lock(tree);
-			tree->polling = 0;
-			pg_tree_scope_unlock(tree);
-			pg_tree_reader_scope_sweep(tree);
-			return pg_result(status, error);
+			pg_context_lock(tree->context);
+			cut->next = tree->pending_head;
+			tree->pending_head = delivery;
+			if (!tree->pending_tail)
+				tree->pending_tail = cut;
+			tree->loss_pending |= loss_cut;
+			goto poll_done;
 		}
-		tree->pending_head = batch->next;
-		if (!tree->pending_head)
-			tree->pending_tail = NULL;
+		delivery = batch->next;
 		pg_cursor_close(&batch->before, NULL);
 		pg_cursor_close(&batch->after, NULL);
 		free(batch->invalid_name);
 		free(batch->invalid_scope);
-		int last = batch == cut;
 		free(batch);
-		if (last)
-			break;
 	}
+	pg_context_lock(tree->context);
 	if (loss_cut) {
 		pg_visible_change change = {};
 
@@ -1131,18 +1151,21 @@ PG_API pg_status PG_CALL pg_tree_poll(pg_tree *tree,
 			change.sequence = tree->next_sequence++;
 			change.kind = PG_CHANGE_LOSS;
 			tree->loss_reported = 1;
-			if (observer->visible)
+			if (observer->visible) {
+				pg_context_unlock(tree->context);
 				observer->visible(observer->user,
 					&change);
+				pg_context_lock(tree->context);
+			}
 		}
 	}
-	pg_tree_scope_lock(tree);
+poll_done:
 	tree->polling = 0;
-	pg_tree_scope_unlock(tree);
 	pg_tree_reader_scope_sweep(tree);
-	if (status != PG_OK)
-		return pg_result(status, error);
-	return pg_result(PG_OK, error);
+	pg_context_unlock(tree->context);
+	if (status != PG_OK && error && error->status == status)
+		return status;
+	return pg_result(status, error);
 }
 
 } /* extern "C" */

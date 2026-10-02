@@ -40,7 +40,8 @@ static pg_status pg_manage_name(pg_tree *tree, const char *prefix,
 	return status;
 }
 
-pg_status pg_tree_manage(pg_tree *tree, const char *prefix, uint32_t depth,
+static pg_status pg_tree_manage_coordinated(
+		pg_tree *tree, const char *prefix, uint32_t depth,
 		pg_error *error)
 {
 	char *canonical = NULL;
@@ -76,7 +77,21 @@ pg_status pg_tree_manage(pg_tree *tree, const char *prefix, uint32_t depth,
 	return pg_result(PG_OK, error);
 }
 
-pg_status pg_tree_unmanage(pg_tree *tree, const char *prefix, uint32_t depth,
+pg_status pg_tree_manage(pg_tree *tree, const char *prefix, uint32_t depth,
+		pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_manage_coordinated(tree, prefix, depth,
+		error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
+static pg_status pg_tree_unmanage_coordinated(
+		pg_tree *tree, const char *prefix, uint32_t depth,
 		pg_error *error)
 {
 	char *canonical = NULL;
@@ -104,6 +119,19 @@ pg_status pg_tree_unmanage(pg_tree *tree, const char *prefix, uint32_t depth,
 			s->managed = 0;
 	pg_tree_reader_scope_sweep(tree);
 	return pg_result(PG_OK, error);
+}
+
+pg_status pg_tree_unmanage(pg_tree *tree, const char *prefix, uint32_t depth,
+		pg_error *error)
+{
+	pg_context *context = tree ? tree->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_tree_unmanage_coordinated(tree, prefix, depth,
+		error);
+
+	pg_context_unlock(context);
+	return status;
 }
 
 pg_status pg_tree_manage_scan(pg_tree *tree, pg_error *error)
