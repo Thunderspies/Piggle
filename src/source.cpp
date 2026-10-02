@@ -290,11 +290,7 @@ static void pg_source_records_free(pg_source_record *record)
 	while (record) {
 		pg_source_record *next = record->next;
 
-		free((void *)record->info.canonical_name);
-		free((void *)record->info.original_name);
-		free((void *)record->info.cached_header);
-		free(record->native_path);
-		free(record);
+		pg_record_release(record);
 		record = next;
 	}
 }
@@ -467,7 +463,7 @@ static pg_status pg_source_loose_probe(pg_source *source,
 		const char *canonical, pg_source_record **selected,
 		int *native_code)
 {
-	char *path = NULL, *original = NULL;
+	char *original = NULL;
 	pg_source_record *record;
 	struct stat found;
 	int directory = 0;
@@ -482,74 +478,57 @@ static pg_status pg_source_loose_probe(pg_source *source,
 		status = directory ? PG_CONFLICT : PG_NOT_FOUND;
 		goto cleanup_probe;
 	}
-	path = strdup(source->native_path);
-	status = path ? pg_source_append_component(&path, original + 1) :
-		PG_NOMEM;
-	if (status != PG_OK)
-		goto cleanup_probe;
 	for (record = source->records; record; record = record->next) {
 		if (strcmp(record->info.canonical_name, canonical) == 0)
 			break;
 	}
 	if (record && record->identity.st_dev == found.st_dev &&
 	    record->identity.st_ino == found.st_ino) {
-		char *spelling = strdup(original + 1);
-
-		if (!spelling) {
-			status = PG_NOMEM;
-			goto cleanup_probe;
-		}
-		if (!pg_native_stat_same(&record->identity, &found)) {
+		struct stat previous = pg_record_stat(record);
+		if (!pg_native_stat_same(&previous, &found)) {
 			if (record->info.copy_generation == UINT64_MAX) {
-				free(spelling);
 				status = PG_LIMIT;
 				goto cleanup_probe;
 			}
 			record->info.copy_generation++;
 		}
-		free(record->native_path);
-		record->native_path = path;
-		path = NULL;
-		free((void *)record->info.original_name);
-		record->info.original_name = spelling;
+		if (strcmp(record->info.original_name, original + 1)) {
+			pg_source_record names = {};
+			int named = pg_record_native_names(
+				&names, canonical, original + 1);
+			if (!named) {
+				pg_record_names_free(&names);
+				status = PG_NOMEM;
+				goto cleanup_probe;
+			}
+			pg_record_names_free(record);
+			record->packed_names = 0;
+			record->info.canonical_name = names.info.canonical_name;
+			record->info.original_name = names.info.original_name;
+		}
 	} else {
 		if (!source->context->next_id) {
 			status = PG_LIMIT;
 			goto cleanup_probe;
 		}
-		record = (pg_source_record *)calloc(1, sizeof(*record));
+		record = pg_record_native_new(
+			source->context, canonical, original + 1);
 		if (!record) {
 			status = PG_NOMEM;
 			goto cleanup_probe;
 		}
-		record->info.canonical_name = strdup(canonical);
-		record->info.original_name = strdup(original + 1);
-		if (!record->info.canonical_name ||
-		    !record->info.original_name) {
-			pg_source_records_free(record);
-			status = PG_NOMEM;
-			goto cleanup_probe;
-		}
-		record->native_path = path;
-		path = NULL;
-		record->info.source_id = source->id;
-		record->info.source_generation = source->generation;
 		record->info.copy_id = source->context->next_id++;
 		record->info.copy_generation = 1;
 		pg_source_index_clear(source);
 		record->next = source->records;
 		source->records = record;
 	}
-	record->identity = found;
-	record->info.archive_record = UINT64_MAX;
+	pg_record_identity_set(record, &found);
 	record->info.logical_size = (uint64_t)found.st_size;
-	record->info.stored_size = (uint64_t)found.st_size;
 	record->info.mtime = found.st_mtime;
-	record->info.encoding = PG_LOGICAL;
 	*selected = record;
 
 cleanup_probe:
-	free(path);
 	free(original);
 	return status;
 }
@@ -559,33 +538,14 @@ static pg_status pg_source_loose_add(pg_source *source,
 		const struct stat *identity, uint32_t attributes)
 {
 	pg_source_record *record;
-	char *native;
-	pg_status status;
 
 	if (identity->st_size < 0)
 		return PG_LIMIT;
 	if (!source->context->next_id)
 		return PG_LIMIT;
-	record = (pg_source_record *)calloc(1, sizeof(*record));
-	if (!record)
-		return PG_NOMEM;
-	native = strdup(source->native_path);
-	record->info.canonical_name = strdup(canonical);
-	record->info.original_name = strdup(original);
-	if (!native || !record->info.canonical_name ||
-	    !record->info.original_name) {
-		free(native);
-		pg_source_records_free(record);
-		return PG_NOMEM;
-	}
-	status = pg_source_append_component(&native, original);
-	if (status != PG_OK) {
-		free(native);
-		pg_source_records_free(record);
-		return status;
-	}
-	record->native_path = native;
-	record->identity = *identity;
+	record = pg_record_native_new(source->context, canonical, original);
+	if (!record) return PG_NOMEM;
+	pg_record_identity_set(record, identity);
 	record->attributes = attributes;
 #ifdef _WIN32
 	if (identity->st_attributes & FILE_ATTRIBUTE_HIDDEN)
@@ -601,16 +561,11 @@ static pg_status pg_source_loose_add(pg_source *source,
 	if (!(identity->st_mode & 0222))
 #endif
 		record->attributes |= PG_ENTRY_READ_ONLY;
-	record->info.source_id = source->id;
-	record->info.source_generation = source->generation;
 	record->info.copy_id = source->context->next_id++;
 	record->info.copy_generation = 1;
-	record->info.archive_record = UINT64_MAX;
-	record->info.logical_size = S_ISDIR(identity->st_mode) ? 0 :
-		(uint64_t)identity->st_size;
-	record->info.stored_size = record->info.logical_size;
+	record->info.logical_size =
+		S_ISDIR(identity->st_mode) ? 0 : (uint64_t)identity->st_size;
 	record->info.mtime = identity->st_mtime;
-	record->info.encoding = PG_LOGICAL;
 	pg_source_index_clear(source);
 	record->next = source->records;
 	source->records = record;
@@ -632,7 +587,8 @@ static int pg_source_record_name_compare(const void *left,
 }
 
 /* Select one original spelling for each canonical loose name. */
-static pg_status pg_source_loose_compact(pg_source *source)
+static pg_status pg_source_loose_compact(
+	pg_source *source, pg_source_record ***out = NULL, size_t *size = NULL)
 {
 	pg_source_index_clear(source);
 	pg_source_record **items;
@@ -640,6 +596,8 @@ static pg_status pg_source_loose_compact(pg_source *source)
 	size_t count = 0;
 	size_t kept = 0;
 	size_t i;
+	if (out) *out = NULL;
+	if (size) *size = 0;
 
 	for (record = source->records; record; record = record->next)
 		count++;
@@ -666,7 +624,11 @@ static pg_status pg_source_loose_compact(pg_source *source)
 	for (i = 0; i < kept; i++)
 		items[i]->next = i + 1 < kept ? items[i + 1] : NULL;
 	source->records = items[0];
-	free(items);
+	if (out) {
+		*out = items;
+		*size = kept;
+	} else
+		free(items);
 	return PG_OK;
 }
 
@@ -695,8 +657,8 @@ static pg_status pg_source_record_index(pg_source_record *head,
 	return PG_OK;
 }
 
-static pg_source_record *pg_source_record_index_find(
-		pg_source_record **items, size_t count, const char *name)
+static pg_source_record **pg_source_record_index_slot(
+	pg_source_record **items, size_t count, const char *name)
 {
 	size_t low = 0, high = count;
 
@@ -705,14 +667,22 @@ static pg_source_record *pg_source_record_index_find(
 		int order = strcmp(items[middle]->info.canonical_name,
 			name);
 
-		if (!order)
-			return items[middle];
+		if (!order) return &items[middle];
 		if (order < 0)
 			low = middle + 1;
 		else
 			high = middle;
 	}
 	return NULL;
+}
+
+static pg_source_record *pg_source_record_index_find(
+	pg_source_record **items, size_t count, const char *name)
+{
+	pg_source_record **slot =
+		pg_source_record_index_slot(items, count, name);
+
+	return slot ? *slot : NULL;
 }
 
 static pg_status pg_source_loose_scan_fallback(pg_source *source, int dir,
@@ -1284,7 +1254,7 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 		record->next = NULL;
 		pg_source_records_free(record);
 	}
-	status = pg_source_loose_compact(&probe);
+	status = pg_source_loose_compact(&probe, &items, &count);
 	if (status != PG_OK) {
 		pg_source_records_free(probe.records);
 		return status;
@@ -1298,15 +1268,13 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 			if (strcmp(record->info.canonical_name,
 				prefix) == 0) {
 				pg_source_records_free(probe.records);
+				pg_source_index_clear(&probe);
+				free(items);
 				return PG_CONFLICT;
 			}
 		}
 	}
-	status = pg_source_record_index(probe.records, &items, &count);
-	if (status != PG_OK) {
-		pg_source_records_free(probe.records);
-		return status;
-	}
+	pg_source_index_clear(&probe);
 	for (old = source->records; old; old = old->next) {
 		pg_source_record *found;
 
@@ -1316,17 +1284,48 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 			continue;
 		found = pg_source_record_index_find(items, count,
 			old->info.canonical_name);
+		struct stat previous = pg_record_stat(old);
+		struct stat current = found ? pg_record_stat(found) : previous;
 		if (found && old->info.copy_generation == UINT64_MAX &&
-		    !pg_native_stat_same(&found->identity,
-			&old->identity)) {
+			!pg_native_stat_same(&current, &previous)) {
 			free(items);
 			pg_source_records_free(probe.records);
 			return PG_LIMIT;
 		}
 	}
+	/* Retain the ordered unrefreshed part and merge the compacted scope.
+	 * No operation after this allocation can fail, so publication is
+	 * atomic.
+	 */
+	pg_source_record **ordered = source->record_index;
+	size_t previous_count = source->record_count, outside = 0;
+	pg_source_record **merged = NULL;
+	if (ordered || !source->records) {
+		if (previous_count >= SIZE_MAX / sizeof(*merged) ||
+			count >= SIZE_MAX / sizeof(*merged) - previous_count) {
+			free(items);
+			pg_source_records_free(probe.records);
+			return PG_LIMIT;
+		}
+		merged = (pg_source_record **)malloc(
+			(previous_count + count + 1) * sizeof(*merged));
+		if (!merged) {
+			free(items);
+			pg_source_records_free(probe.records);
+			return PG_NOMEM;
+		}
+		for (size_t i = 0; i < previous_count; i++) {
+			const char *name = ordered[i]->info.canonical_name;
+			if (shallow == 2 ? strcmp(name, prefix)
+					 : !pg_name_in_scope(
+						   name, prefix, !shallow))
+				ordered[outside++] = ordered[i];
+		}
+	}
 	old = source->records;
-	pg_source_index_clear(source);
-	source->records = probe.records;
+	source->record_index = NULL;
+	source->record_count = 0;
+	source->records = NULL;
 	while (old) {
 		pg_source_record *found;
 
@@ -1339,20 +1338,54 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 			old = next;
 			continue;
 		}
-		found = pg_source_record_index_find(items, count,
-			old->info.canonical_name);
+		pg_source_record **slot = pg_source_record_index_slot(
+			items, count, old->info.canonical_name);
+		found = slot ? *slot : NULL;
 		if (found) {
 			found->info.copy_id = old->info.copy_id;
 			found->info.copy_generation =
 				old->info.copy_generation;
-			if (!pg_native_stat_same(&found->identity,
-				&old->identity))
+			struct stat previous = pg_record_stat(old);
+			struct stat current = pg_record_stat(found);
+			if (!pg_native_stat_same(&current, &previous))
 				found->info.copy_generation++;
+			else if (old->packed_names &&
+				old->attributes == found->attributes &&
+				!strcmp(old->info.original_name,
+					found->info.original_name)) {
+				/* Existing snapshots can share this unchanged
+				 * record. */
+				*slot = old;
+				found->next = NULL;
+				pg_source_records_free(found);
+				old = next;
+				continue;
+			}
 		}
 		old->next = NULL;
 		pg_source_records_free(old);
 		old = next;
 	}
+	for (size_t i = 0; i < count; i++) {
+		items[i]->next = source->records;
+		source->records = items[i];
+	}
+	if (merged) {
+		size_t a = 0, b = 0, kept = 0;
+		while (a < outside || b < count) {
+			if (b == count ||
+				(a < outside &&
+					strcmp(ordered[a]->info.canonical_name,
+						items[b]->info.canonical_name) <
+						0))
+				merged[kept++] = ordered[a++];
+			else
+				merged[kept++] = items[b++];
+		}
+		source->record_index = merged;
+		source->record_count = kept;
+	}
+	free(ordered);
 	free(items);
 	return PG_OK;
 }
@@ -1892,7 +1925,7 @@ static pg_status pg_source_pigg_clone(pg_source *source,
 		else {
 			for (record = source->records; record;
 			     record = record->next) {
-				if (record->info.archive_record == target)
+				if (record->archive->archive_record == target)
 					break;
 			}
 			if (!record || strcmp(name,
@@ -2134,8 +2167,10 @@ static pg_status pg_source_pigg_clone(pg_source *source,
 	if (status != PG_OK)
 		goto pigg_done;
 	for (record = probe.records; record; record = record->next) {
+		pg_file_info captured = pg_record_file_info(
+			record, source->id, source->generation);
 		status = pg_archive_verify_payload(fd, created.st_size,
-			&record->info, record->payload_offset, 0);
+			&captured, record->archive->payload_offset, 0);
 		if (status != PG_OK)
 			goto pigg_done;
 	}
@@ -2182,9 +2217,6 @@ static pg_status pg_source_pigg_clone(pg_source *source,
 	    source->attached->watch_mode == PG_WATCH_NATIVE)
 		source->attached->native_repair = 1;
 	for (record = probe.records; record; record = record->next) {
-		record->info.source_id = source->id;
-		record->info.source_generation =
-			source->generation + 1;
 		record->info.copy_id = source->context->next_id++;
 		record->info.copy_generation = 1;
 	}
@@ -2260,7 +2292,7 @@ static pg_status pg_source_pigg_delete_coordinated(
 	if (!record)
 		return pg_result(PG_STALE, error);
 	return pg_source_pigg_clone(source, NULL, NULL,
-		(uint32_t)record->info.archive_record, UINT32_MAX, error);
+		(uint32_t)record->archive->archive_record, UINT32_MAX, error);
 }
 
 pg_status pg_source_pigg_delete(pg_file *file, pg_error *error)
@@ -2735,7 +2767,7 @@ static pg_status pg_source_hogg_stage(pg_writer *writer,
 			latest = record;
 	record = latest;
 	if (record) {
-		slot = (uint32_t)record->info.archive_record;
+		slot = (uint32_t)record->archive->archive_record;
 		status = pg_read_span(source->fd, current.st_size,
 			table + 32 * (uint64_t)slot, disk,
 			sizeof(disk));
@@ -2807,8 +2839,8 @@ static pg_status pg_source_hogg_stage(pg_writer *writer,
 	if (!writer->metadata_only &&
 	    fseeko(writer->builder->staging, 0, SEEK_SET))
 		return pg_native_result(PG_IO, errno, error);
-	payload = writer->metadata_only ? record->payload_offset :
-		(uint64_t)current.st_size;
+	payload = writer->metadata_only ? record->archive->payload_offset
+					: (uint64_t)current.st_size;
 	uint8_t bytes[65536];
 	uint64_t remaining = writer->metadata_only ? 0 : entry->stored_size;
 
@@ -2924,10 +2956,10 @@ static pg_status pg_source_archive_finish_locked(pg_writer *writer,
 	if (writer->target_copy_id) {
 		for (record = source->records; record; record = record->next) {
 			if (record->info.copy_id == writer->target_copy_id &&
-			    record->info.copy_generation ==
-				writer->target_copy_generation &&
-			    record->info.archive_record ==
-				writer->target_record)
+				record->info.copy_generation ==
+					writer->target_copy_generation &&
+				record->archive->archive_record ==
+					writer->target_record)
 				break;
 		}
 		if (!record)
@@ -3018,8 +3050,8 @@ static pg_status pg_source_metadata_locked(pg_file *file,
 		return pg_result(PG_STALE, error);
 	entry.canonical_name = (char *)record->info.canonical_name;
 	entry.original_name = (char *)record->info.original_name;
-	entry.cached_header = (void *)record->info.cached_header;
-	entry.cached_header_size = record->info.cached_header_size;
+	entry.cached_header = (void *)record->archive->cached_header;
+	entry.cached_header_size = record->archive->cached_header_size;
 	entry.mtime = record->info.mtime;
 	if (options->fields & PG_METADATA_MTIME)
 		entry.mtime = options->mtime;
@@ -3033,15 +3065,18 @@ static pg_status pg_source_metadata_locked(pg_file *file,
 		entry.cached_header_size = options->cached_header_size;
 	}
 	if (entry.mtime == record->info.mtime &&
-	    entry.cached_header_size == record->info.cached_header_size &&
-	    (!entry.cached_header_size || !memcmp(entry.cached_header,
-		record->info.cached_header, entry.cached_header_size)))
+		entry.cached_header_size ==
+			record->archive->cached_header_size &&
+		(!entry.cached_header_size ||
+			!memcmp(entry.cached_header,
+				record->archive->cached_header,
+				entry.cached_header_size)))
 		return pg_result(PG_OK, error);
 	entry.logical_size = record->info.logical_size;
-	entry.stored_size = record->info.stored_size;
-	entry.encoding = record->info.encoding;
-	entry.stage_offset = record->payload_offset;
-	memcpy(entry.digest, record->info.digest, sizeof(entry.digest));
+	entry.stored_size = record->archive->stored_size;
+	entry.encoding = record->archive->encoding;
+	entry.stage_offset = record->archive->payload_offset;
+	memcpy(entry.digest, record->archive->digest, sizeof(entry.digest));
 	if (source->format == PG_PIGG2) {
 		int fd = dup(source->fd);
 		FILE *staging;
@@ -3056,8 +3091,8 @@ static pg_status pg_source_metadata_locked(pg_file *file,
 			return pg_native_result(PG_IO, code, error);
 		}
 		status = pg_source_pigg_clone(source, &entry, staging,
-			UINT32_MAX, (uint32_t)record->info.archive_record,
-				error);
+			UINT32_MAX, (uint32_t)record->archive->archive_record,
+			error);
 		if (fclose(staging) && status == PG_OK) {
 			pg_native_result(PG_COMMITTED, errno, error);
 			if (error)
@@ -3068,7 +3103,7 @@ static pg_status pg_source_metadata_locked(pg_file *file,
 	}
 	if (!(options->fields & PG_METADATA_HEADER)) {
 		uint8_t header[24], disk[32], frame[56] = {};
-		uint32_t slot = (uint32_t)record->info.archive_record;
+		uint32_t slot = (uint32_t)record->archive->archive_record;
 
 		status = pg_read_span(source->fd, current.st_size, 0,
 			header, sizeof(header));
@@ -3278,9 +3313,7 @@ static pg_status PG_CALL pg_source_open_coordinated(
 			status = PG_LIMIT;
 			goto cleanup;
 		}
-		record->info.source_id = source->id;
 		record->info.copy_id = context->next_id++;
-		record->info.source_generation = 1;
 		record->info.copy_generation = 1;
 	}
 	source->refs = 1;
@@ -3702,50 +3735,84 @@ PG_API pg_status PG_CALL pg_source_unpack(
 pg_status pg_source_select(pg_source *source,
 		pg_source_record *selected, pg_file **out, pg_error *error)
 {
-	pg_file *file = (pg_file *)calloc(1, sizeof(*file));
-	pg_status status;
-
+	/* Packed loose names are immutable bytes in a retained record
+	 * allocation. Metadata itself remains copied, so rescans cannot change
+	 * this snapshot.
+	 */
+	if (source->format == PG_LOOSE && selected->packed_names) {
+		pg_file *file = (pg_file *)calloc(1, sizeof(*file));
+		if (!file) return pg_result(PG_NOMEM, error);
+		pg_status status = pg_record_retain(selected);
+		if (status == PG_OK) {
+			status = pg_source_retain(source);
+			if (status != PG_OK) pg_record_release(selected);
+		}
+		if (status != PG_OK) {
+			free(file);
+			return pg_result(status, error);
+		}
+		file->packed = 1;
+		file->names_record = selected;
+		file->source = source;
+		file->info = pg_record_file_info(
+			selected, source->id, source->generation);
+		file->attributes = selected->attributes;
+		file->source_identity = pg_record_stat(selected);
+		*out = file;
+		return pg_result(PG_OK, error);
+	}
+	int native = source->format == PG_LOOSE;
+	size_t root_size = native ? strlen(source->native_path) + 1 : 0;
+	size_t original_size = strlen(selected->info.original_name) + 1;
+	if (root_size > SIZE_MAX - original_size)
+		return pg_result(PG_LIMIT, error);
+	size_t names = root_size + original_size;
+	int different = strcmp(selected->info.canonical_name,
+				selected->info.original_name) != 0;
+	size_t canonical =
+		different ? strlen(selected->info.canonical_name) + 1 : 0;
+	size_t header =
+		selected->archive ? selected->archive->cached_header_size : 0;
+	if (names > SIZE_MAX - sizeof(pg_file) ||
+		canonical > SIZE_MAX - sizeof(pg_file) - names ||
+		header > SIZE_MAX - sizeof(pg_file) - names - canonical)
+		return pg_result(PG_LIMIT, error);
+	pg_file *file = (pg_file *)calloc(
+		1, sizeof(*file) + names + canonical + header);
 	if (!file)
 		return pg_result(PG_NOMEM, error);
-	file->info = selected->info;
-	file->info.canonical_name = strdup(selected->info.canonical_name);
-	file->info.original_name = strdup(selected->info.original_name);
-	file->info.cached_header = NULL;
-	if (selected->info.cached_header_size) {
-		file->info.cached_header = malloc(
-			selected->info.cached_header_size);
-		if (file->info.cached_header)
-			memcpy((void *)file->info.cached_header,
-				selected->info.cached_header,
-				selected->info.cached_header_size);
+	file->packed = 1;
+	file->info =
+		pg_record_file_info(selected, source->id, source->generation);
+	char *storage = (char *)(file + 1);
+	if (native) {
+		memcpy(storage, source->native_path, root_size - 1);
+		storage[root_size - 1] = '/';
 	}
-	if (selected->native_path)
-		file->native_path = strdup(selected->native_path);
-	if (!file->info.canonical_name || !file->info.original_name ||
-	    (selected->native_path && !file->native_path) ||
-	    (selected->info.cached_header_size &&
-	     !file->info.cached_header)) {
-		free((void *)file->info.canonical_name);
-		free((void *)file->info.original_name);
-		free((void *)file->info.cached_header);
-		free(file->native_path);
-		free(file);
-		return pg_result(PG_NOMEM, error);
+	memcpy(storage + root_size, selected->info.original_name,
+		original_size);
+	file->native_path = native ? storage : NULL;
+	file->info.original_name = storage + root_size;
+	storage += names;
+	file->info.canonical_name =
+		different ? storage : file->info.original_name;
+	if (different) {
+		memcpy(storage, selected->info.canonical_name, canonical);
+		storage += canonical;
 	}
-	status = pg_source_retain(source);
+	file->info.cached_header = header ? storage : NULL;
+	if (header) memcpy(storage, selected->archive->cached_header, header);
+	pg_status status = pg_source_retain(source);
 	if (status != PG_OK) {
-		free((void *)file->info.canonical_name);
-		free((void *)file->info.original_name);
-		free((void *)file->info.cached_header);
-		free(file->native_path);
 		free(file);
 		return pg_result(status, error);
 	}
 	file->source = source;
 	file->attributes = selected->attributes;
-	file->payload_offset = selected->payload_offset;
-	file->source_identity = selected->native_path ?
-		selected->identity : source->identity;
+	file->payload_offset =
+		selected->archive ? selected->archive->payload_offset : 0;
+	file->source_identity =
+		native ? pg_record_stat(selected) : source->identity;
 	*out = file;
 	return pg_result(PG_OK, error);
 }
@@ -3758,7 +3825,8 @@ static pg_status pg_source_find_mode_coordinated(
 {
 	pg_source_record *selected = NULL;
 	pg_source_record *transient = NULL;
-	char *canonical;
+	char local[512];
+	char *canonical = local;
 	size_t required = 0;
 	pg_status status;
 	int native_code = 0;
@@ -3775,17 +3843,16 @@ static pg_status pg_source_find_mode_coordinated(
 	status = pg_source_control_status(source, 0);
 	if (status != PG_OK)
 		return pg_result(status, error);
-	status = pg_name_normalize(source->context, name, NULL, 0,
-		&required, NULL);
-	if (status != PG_CAPACITY)
-		return pg_result(status, error);
-	canonical = (char *)malloc(required);
-	if (!canonical)
-		return pg_result(PG_NOMEM, error);
-	status = pg_name_normalize(source->context, name, canonical,
-		required, &required, NULL);
+	status = pg_name_normalize(
+		source->context, name, local, sizeof(local), &required, NULL);
+	if (status == PG_CAPACITY) {
+		canonical = (char *)malloc(required);
+		if (!canonical) return pg_result(PG_NOMEM, error);
+		status = pg_name_normalize(source->context, name, canonical,
+			required, &required, NULL);
+	}
 	if (status != PG_OK) {
-		free(canonical);
+		if (canonical != local) free(canonical);
 		return pg_result(status, error);
 	}
 	if (source->format == PG_LOOSE &&
@@ -3798,7 +3865,7 @@ static pg_status pg_source_find_mode_coordinated(
 			status = pg_source_request_add(
 				&source->exact_requests, canonical);
 			if (status != PG_OK) {
-				free(canonical);
+				if (canonical != local) free(canonical);
 				return pg_result(status, error);
 			}
 		}
@@ -3810,7 +3877,7 @@ static pg_status pg_source_find_mode_coordinated(
 		if (status != PG_OK) {
 			if (fresh)
 				pg_source_records_free(probe.records);
-			free(canonical);
+			if (canonical != local) free(canonical);
 			return pg_native_result(status, native_code, error);
 		}
 		if (fresh)
@@ -3821,16 +3888,16 @@ static pg_status pg_source_find_mode_coordinated(
 
 		status = pg_source_index_get(source, &items, &count);
 		if (status != PG_OK) {
-			free(canonical);
+			if (canonical != local) free(canonical);
 			return pg_result(status, error);
 		}
 		if (pg_source_items_directory(items, count, canonical)) {
-			free(canonical);
+			if (canonical != local) free(canonical);
 			return pg_result(PG_CONFLICT, error);
 		}
 		selected = pg_source_index_last(items, count, canonical);
 	}
-	free(canonical);
+	if (canonical != local) free(canonical);
 	if (!selected)
 		return pg_result(PG_NOT_FOUND, error);
 	if (S_ISDIR(selected->identity.st_mode)) {
@@ -4073,6 +4140,20 @@ static int pg_source_children_covered(pg_source *source, const char *prefix)
 	return 0;
 }
 
+pg_status pg_source_entry_records(pg_source *source, const char *prefix,
+	int recursive, pg_source_record ***out, size_t *count)
+{
+	if (source->stale) return PG_STALE;
+	pg_status status = pg_source_control_status(source, 0);
+	if (status != PG_OK) return status;
+	if (!pg_source_request_covered(source, prefix) &&
+		(recursive || !pg_source_children_covered(source, prefix)))
+		return PG_INVALID;
+	if (prefix && pg_source_name_kind(source, prefix) == PG_OK)
+		return PG_CONFLICT;
+	return pg_source_records_scope(source, prefix, out, count);
+}
+
 /* Capture visible source files in canonical order without native probes. */
 static pg_status pg_source_files_depth_coordinated(
 		pg_source *source, const char *prefix,
@@ -4140,8 +4221,8 @@ static pg_status pg_source_files_depth_coordinated(
 	cursor->source = source;
 	cursor->context = source->context;
 	pg_context_child_add(cursor->context);
-	cursor->files = (pg_file **)calloc(count ? count : 1,
-		sizeof(*cursor->files));
+	size_t capacity = recursive && count ? count : 16;
+	cursor->files = (pg_file **)calloc(capacity, sizeof(*cursor->files));
 	if (!cursor->files) {
 		status = PG_NOMEM;
 		goto fail_cursor;
@@ -4150,6 +4231,17 @@ static pg_status pg_source_files_depth_coordinated(
 		size_t next = i + 1;
 		pg_source_record *selected = items[i];
 		const char *name = selected->info.canonical_name;
+		if (!recursive) {
+			const char *relative =
+				name + (canonical ? strlen(canonical) + 1 : 0);
+			const char *slash = strchr(relative, '/');
+
+			if (slash) {
+				i = pg_records_after_directory(items, count, i,
+					name, (size_t)(slash - name));
+				continue;
+			}
+		}
 
 		while (next < count && strcmp(name,
 			items[next]->info.canonical_name) == 0) {
@@ -4159,6 +4251,22 @@ static pg_status pg_source_files_depth_coordinated(
 		if (pg_name_in_scope(name, canonical, recursive) &&
 		    !S_ISDIR(selected->identity.st_mode) &&
 		    !pg_source_items_directory(items, count, name)) {
+			if (cursor->count == capacity) {
+				if (capacity >
+					SIZE_MAX / 2 / sizeof(*cursor->files)) {
+					status = PG_LIMIT;
+					goto fail_cursor;
+				}
+				pg_file **files =
+					(pg_file **)realloc(cursor->files,
+						capacity * 2 * sizeof(*files));
+				if (!files) {
+					status = PG_NOMEM;
+					goto fail_cursor;
+				}
+				cursor->files = files;
+				capacity *= 2;
+			}
 			status = pg_source_select(source, selected,
 				&cursor->files[cursor->count], error);
 			if (status != PG_OK)
@@ -4291,8 +4399,9 @@ static pg_status pg_source_rescan_locked(
 			record->info.copy_id = prior->info.copy_id;
 			record->info.copy_generation =
 				prior->info.copy_generation;
-			if (!pg_native_stat_same(&record->identity,
-				&prior->identity)) {
+			struct stat refreshed = pg_record_stat(record);
+			struct stat previous = pg_record_stat(prior);
+			if (!pg_native_stat_same(&refreshed, &previous)) {
 				if (record->info.copy_generation ==
 				    UINT64_MAX) {
 					free(items);
@@ -4351,20 +4460,24 @@ static pg_status pg_source_rescan_locked(
 		generation++;
 	}
 	for (record = probe.records; record; record = record->next) {
-		const pg_file_info *a = &record->info;
+		pg_file_info captured = pg_record_file_info(
+			record, source->id, source->generation);
+		const pg_file_info *a = &captured;
+		pg_file_info previous;
 		const pg_file_info *b;
 
-		record->info.source_id = source->id;
-		record->info.source_generation = generation;
 		for (old = source->records; old; old = old->next) {
-			if ((source->internal_mutation ?
-			     old->info.archive_record ==
-				record->info.archive_record :
-			     old->payload_offset == record->payload_offset) &&
-			    strcmp(old->info.canonical_name,
-				a->canonical_name) == 0 &&
-			    strcmp(old->info.original_name,
-				a->original_name) == 0)
+			if ((source->internal_mutation
+					    ? old->archive->archive_record ==
+						    record->archive
+							    ->archive_record
+					    : old->archive->payload_offset ==
+						    record->archive
+							    ->payload_offset) &&
+				strcmp(old->info.canonical_name,
+					a->canonical_name) == 0 &&
+				strcmp(old->info.original_name,
+					a->original_name) == 0)
 				break;
 		}
 		if (!old) {
@@ -4374,7 +4487,9 @@ static pg_status pg_source_rescan_locked(
 			record->info.copy_generation = 1;
 			continue;
 		}
-		b = &old->info;
+		previous = pg_record_file_info(
+			old, source->id, source->generation);
+		b = &previous;
 		record->info.copy_id = b->copy_id;
 		record->info.copy_generation = b->copy_generation;
 		if (invalidate || (!source->internal_mutation &&
@@ -4532,9 +4647,11 @@ static pg_status pg_source_validate_locked(
 		return pg_result(PG_OK, error);
 	}
 	for (record = source->records; record; record = record->next) {
+		pg_file_info captured = pg_record_file_info(
+			record, source->id, source->generation);
 		status = pg_archive_verify_payload(source->fd,
-			(uint64_t)source->identity.st_size,
-			&record->info, record->payload_offset, 0);
+			(uint64_t)source->identity.st_size, &captured,
+			record->archive->payload_offset, 0);
 		if (status != PG_OK)
 			return pg_result(status, error);
 	}

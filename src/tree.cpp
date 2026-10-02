@@ -1045,6 +1045,23 @@ static pg_status pg_tree_prefix_check(pg_tree *tree, const char *prefix)
 	return status;
 }
 
+/* A single loose source already has every physical directory in order. */
+pg_status pg_tree_entry_records(pg_tree *tree, const char *prefix,
+	int recursive, pg_source_record ***out, size_t *count, pg_error *error)
+{
+	pg_status status = pg_tree_control_status(tree, 0);
+	if (status != PG_OK) return pg_result(status, error);
+	status = pg_tree_native_reconcile(tree, error);
+	if (status != PG_OK) return status;
+	if (status == PG_OK &&
+		!pg_tree_scope_covers_depth(tree, prefix, recursive))
+		status = PG_INVALID;
+	if (status == PG_OK)
+		status = pg_source_entry_records(
+			tree->sources[0], prefix, recursive, out, count);
+	return pg_result(status, error);
+}
+
 /* Merge captured source selections without per-file lookups. */
 static pg_status pg_tree_files_depth_coordinated(
 		pg_tree *tree, const char *prefix,
@@ -1359,11 +1376,7 @@ static void pg_tree_records_free(pg_source_record *record)
 	while (record) {
 		pg_source_record *next = record->next;
 
-		free((void *)record->info.canonical_name);
-		free((void *)record->info.original_name);
-		free((void *)record->info.cached_header);
-		free(record->native_path);
-		free(record);
+		pg_record_release(record);
 		record = next;
 	}
 }
@@ -1378,35 +1391,40 @@ static pg_source_record *pg_tree_records_clone(pg_source_record *source,
 		if (!pg_name_in_scope(source->info.canonical_name, prefix,
 			recursive))
 			continue;
-		pg_source_record *copy = (pg_source_record *)calloc(1,
-			sizeof(*copy));
+		pg_source_record *copy = source->archive
+			? pg_record_archive_new()
+			: (pg_source_record *)calloc(1, sizeof(*copy));
 
 		if (!copy)
 			goto clone_failed;
+		pg_record_archive *archive = copy->archive;
 		*copy = *source;
+#ifdef _WIN32
+		copy->native_heap = NULL;
+#endif
+		copy->archive = archive;
+		if (archive) *archive = *source->archive;
+		copy->extra_refs = 0;
+		copy->packed_names = 0;
 		copy->next = NULL;
 		copy->info.canonical_name = strdup(
 			source->info.canonical_name);
 		copy->info.original_name = strdup(
 			source->info.original_name);
-		copy->info.cached_header = NULL;
-		copy->native_path = source->native_path ?
-			strdup(source->native_path) : NULL;
-		if (source->info.cached_header_size) {
-			copy->info.cached_header = malloc(
-				source->info.cached_header_size);
-			if (copy->info.cached_header)
-				memcpy((void *)copy->info.cached_header,
-					source->info.cached_header,
-					source->info.cached_header_size);
+		if (archive) archive->cached_header = NULL;
+		if (archive && source->archive->cached_header_size) {
+			copy->archive->cached_header =
+				malloc(source->archive->cached_header_size);
+			if (copy->archive->cached_header)
+				memcpy((void *)copy->archive->cached_header,
+					source->archive->cached_header,
+					source->archive->cached_header_size);
 		}
 		*tail = copy;
 		tail = &copy->next;
-		if (!copy->info.canonical_name ||
-		    !copy->info.original_name ||
-		    (source->native_path && !copy->native_path) ||
-		    (source->info.cached_header_size &&
-		     !copy->info.cached_header))
+		if (!copy->info.canonical_name || !copy->info.original_name ||
+			(archive && source->archive->cached_header_size &&
+				!copy->archive->cached_header))
 			goto clone_failed;
 	}
 	return head;

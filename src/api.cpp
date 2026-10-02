@@ -43,6 +43,9 @@ PG_API pg_status PG_CALL pg_context_close(pg_context **context,
 		return pg_result(PG_BUSY, error);
 	}
 	pg_context_unlock(*context);
+#ifdef _WIN32
+	if ((*context)->record_heap) HeapDestroy((*context)->record_heap);
+#endif
 	pg_context_sync_destroy(*context);
 	free(*context);
 	*context = NULL;

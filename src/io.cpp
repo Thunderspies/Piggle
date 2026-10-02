@@ -200,7 +200,7 @@ static pg_status pg_reader_native_check(pg_reader *reader, int *native_code)
 		    reader->file_info.copy_generation)
 			return PG_STALE;
 		reader->identity = source->identity;
-		reader->payload_offset = record->payload_offset;
+		reader->payload_offset = record->archive->payload_offset;
 	}
 	if (fstat(reader->fd, &current)) {
 		*native_code = errno;
@@ -1045,6 +1045,8 @@ static pg_status pg_reader_open_locked(
 	if (pg_atomic_load(&file->source->live_readers) == SIZE_MAX)
 		return pg_result(PG_LIMIT, error);
 	if (file->source->format == PG_LOOSE) {
+		status = pg_file_prepare_native(file);
+		if (status != PG_OK) return pg_result(status, error);
 		status = pg_reader_open_native(file->source->context,
 			file->native_path, out, error);
 		if (status == PG_NOT_FOUND)
@@ -1072,7 +1074,7 @@ static pg_status pg_reader_open_locked(
 	     record = record->next) {
 		if (record->info.copy_id == file->info.copy_id) {
 			found_copy = 1;
-			payload_offset = record->payload_offset;
+			payload_offset = record->archive->payload_offset;
 			if (record->info.copy_generation !=
 			    file->info.copy_generation)
 				return pg_result(PG_STALE, error);
@@ -1581,7 +1583,7 @@ static pg_status pg_writer_open_archive_source(pg_source *source,
 	if (record) {
 		writer->target_copy_id = record->info.copy_id;
 		writer->target_copy_generation = record->info.copy_generation;
-		writer->target_record = record->info.archive_record;
+		writer->target_record = record->archive->archive_record;
 	}
 	source->live_writers++;
 	*out = writer;
@@ -1640,11 +1642,13 @@ static pg_status PG_CALL pg_writer_open_source_coordinated(
 	status = pg_source_find_fresh(destination, canonical, &existing,
 		&find_error);
 	if (status == PG_OK) {
-		native = strdup(existing->native_path);
+		status = pg_file_prepare_native(existing);
+		if (status == PG_OK) {
+			native = strdup(existing->native_path);
+			if (!native) status = PG_NOMEM;
+		}
 		flags = PG_OVERWRITE;
 		pg_file_close(&existing, NULL);
-		if (!native)
-			status = PG_NOMEM;
 	} else if (status == PG_NOT_FOUND) {
 		size_t prefix = strlen(destination->native_path);
 		size_t length = strlen(canonical);
@@ -1738,6 +1742,8 @@ static pg_status PG_CALL pg_writer_open_file_coordinated(
 		return pg_writer_open_archive_source(file->source,
 			file->info.canonical_name, options, out, error, record);
 	}
+	status = pg_file_prepare_native(file);
+	if (status != PG_OK) return pg_result(status, error);
 	status = pg_writer_open_native_for_source(file->source->context,
 		file->source, file->native_path, options, PG_OVERWRITE,
 		out, error);
