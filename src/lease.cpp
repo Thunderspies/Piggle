@@ -14,6 +14,57 @@ struct pg_source_sync {
 #endif
 };
 
+pg_status pg_context_sync_create(pg_context *context)
+{
+#ifdef _WIN32
+	InitializeCriticalSection(&context->coordination);
+#else
+	pthread_mutexattr_t attributes;
+	int code = pthread_mutexattr_init(&attributes);
+
+	if (code)
+		return PG_IO;
+	code = pthread_mutexattr_settype(&attributes, PTHREAD_MUTEX_RECURSIVE);
+	if (!code)
+		code = pthread_mutex_init(&context->coordination, &attributes);
+	pthread_mutexattr_destroy(&attributes);
+	if (code)
+		return PG_IO;
+#endif
+	return PG_OK;
+}
+
+void pg_context_sync_destroy(pg_context *context)
+{
+#ifdef _WIN32
+	DeleteCriticalSection(&context->coordination);
+#else
+	pthread_mutex_destroy(&context->coordination);
+#endif
+}
+
+void pg_context_lock(pg_context *context)
+{
+	if (!context)
+		return;
+#ifdef _WIN32
+	EnterCriticalSection(&context->coordination);
+#else
+	pthread_mutex_lock(&context->coordination);
+#endif
+}
+
+void pg_context_unlock(pg_context *context)
+{
+	if (!context)
+		return;
+#ifdef _WIN32
+	LeaveCriticalSection(&context->coordination);
+#else
+	pthread_mutex_unlock(&context->coordination);
+#endif
+}
+
 pg_status pg_source_sync_create(pg_source *source)
 {
 	source->sync = (pg_source_sync *)calloc(1, sizeof(*source->sync));

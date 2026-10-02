@@ -166,7 +166,7 @@ extern "C" {
 
 /* Validate format, flags and exclusive native destination. */
 /* Create private staging and builder index; publish handle on success. */
-PG_API pg_status PG_CALL pg_archive_builder_create(
+static pg_status PG_CALL pg_archive_builder_create_coordinated(
 		pg_context *context,
 		const char *native_path,
 		uint32_t format,
@@ -248,6 +248,22 @@ cleanup_parent:
 	free(builder->native_path);
 	free(builder);
 	return pg_native_result(status, native_code, error);
+}
+
+PG_API pg_status PG_CALL pg_archive_builder_create(
+		pg_context *context,
+		const char *native_path,
+		uint32_t format,
+		uint32_t flags,
+		pg_archive_builder **out,
+		pg_error *error)
+{
+	pg_context_lock(context);
+	pg_status status = pg_archive_builder_create_coordinated(context,
+		native_path, format, flags, out, error);
+
+	pg_context_unlock(context);
+	return status;
 }
 
 /* Validate entry metadata, name uniqueness and complete input span. */
@@ -600,7 +616,8 @@ pg_status pg_archive_builder_create_options(pg_context *context,
 	return status;
 }
 
-pg_status pg_archive_builder_finish(pg_archive_builder *builder,
+static pg_status pg_archive_builder_finish_coordinated(
+		pg_archive_builder *builder,
 		pg_error *error)
 {
 	if (!builder || builder->finished)
@@ -619,5 +636,18 @@ pg_status pg_archive_builder_finish(pg_archive_builder *builder,
 	}
 	if (lease >= 0)
 		close(lease);
+	return status;
+}
+
+pg_status pg_archive_builder_finish(pg_archive_builder *builder,
+		pg_error *error)
+{
+	pg_context *context = builder ? builder->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_archive_builder_finish_coordinated(builder,
+		error);
+
+	pg_context_unlock(context);
 	return status;
 }

@@ -148,7 +148,7 @@ file_write_done:
 }
 
 /* Stream one selected logical file into an atomic native writer. */
-PG_API pg_status PG_CALL pg_file_export(
+static pg_status PG_CALL pg_file_export_coordinated(
 		pg_file *file,
 		const char *native_output,
 		uint32_t flags,
@@ -163,6 +163,9 @@ PG_API pg_status PG_CALL pg_file_export(
 	if (!file || !native_output || !*native_output ||
 	    (flags & ~PG_OVERWRITE))
 		return pg_result(PG_INVALID, error);
+	status = pg_source_control_status(file->source, 1);
+	if (status != PG_OK)
+		return pg_result(status, error);
 	pg_write_options_init(&options, file->info.logical_size);
 	options.entry.mtime = file->info.mtime;
 	options.entry.digest_kind = file->info.digest_kind;
@@ -213,6 +216,22 @@ export_done:
 	}
 	if (error)
 		*error = work_error;
+	return status;
+}
+
+PG_API pg_status PG_CALL pg_file_export(
+		pg_file *file,
+		const char *native_output,
+		uint32_t flags,
+		pg_error *error)
+{
+	pg_context *context = file ? file->source->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_file_export_coordinated(file, native_output,
+		flags, error);
+
+	pg_context_unlock(context);
 	return status;
 }
 
@@ -354,7 +373,7 @@ static pg_status pg_file_delete_queued(pg_file *file,
 	return PG_COMMITTED;
 }
 
-PG_API pg_status PG_CALL pg_file_delete(
+static pg_status PG_CALL pg_file_delete_coordinated(
 		pg_file *file,
 		pg_error *error)
 {
@@ -410,10 +429,23 @@ PG_API pg_status PG_CALL pg_file_delete(
 	return pg_file_delete_queued(file, status, error);
 }
 
+PG_API pg_status PG_CALL pg_file_delete(
+		pg_file *file,
+		pg_error *error)
+{
+	pg_context *context = file ? file->source->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_file_delete_coordinated(file, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Accept a null owned handle as a no-op. */
 /* Check close constraints; release resources and references. */
 /* Clear the owned pointer once close is accepted. */
-PG_API pg_status PG_CALL pg_file_close(
+static pg_status PG_CALL pg_file_close_coordinated(
 		pg_file **file,
 		pg_error *error)
 {
@@ -426,9 +458,6 @@ PG_API pg_status PG_CALL pg_file_close(
 	if (!*file)
 		return pg_result(PG_OK, error);
 	owned = *file;
-	status = pg_source_control_status(owned->source, 0);
-	if (status != PG_OK)
-		return pg_result(status, error);
 	*file = NULL;
 	pg_tree *origin = owned->origin_tree;
 	free((void *)owned->info.canonical_name);
@@ -442,8 +471,21 @@ PG_API pg_status PG_CALL pg_file_close(
 	return pg_native_result(status, native_code, error);
 }
 
+PG_API pg_status PG_CALL pg_file_close(
+		pg_file **file,
+		pg_error *error)
+{
+	pg_context *context = file && *file ? (*file)->source->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_file_close_coordinated(file, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Release every unconsumed selection and clear the owned cursor. */
-PG_API pg_status PG_CALL pg_cursor_close(
+static pg_status PG_CALL pg_cursor_close_coordinated(
 		pg_cursor **cursor,
 		pg_error *error)
 {
@@ -457,18 +499,6 @@ PG_API pg_status PG_CALL pg_cursor_close(
 	if (!*cursor)
 		return pg_result(PG_OK, error);
 	owned = *cursor;
-	if (owned->source) {
-		status = pg_source_control_status(owned->source, 0);
-		if (status != PG_OK)
-			return pg_result(status, error);
-	}
-	for (i = owned->position; i < owned->count; i++) {
-		if (!owned->files[i])
-			continue;
-		status = pg_source_control_status(owned->files[i]->source, 0);
-		if (status != PG_OK)
-			return pg_result(status, error);
-	}
 	*cursor = NULL;
 	for (i = owned->position; i < owned->count; i++) {
 		pg_error close_error;
@@ -501,10 +531,23 @@ PG_API pg_status PG_CALL pg_cursor_close(
 	return pg_result(PG_OK, error);
 }
 
+PG_API pg_status PG_CALL pg_cursor_close(
+		pg_cursor **cursor,
+		pg_error *error)
+{
+	pg_context *context = cursor && *cursor ? (*cursor)->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_cursor_close_coordinated(cursor, error);
+
+	pg_context_unlock(context);
+	return status;
+}
+
 } /* extern "C" */
 
 /* Validate capture and fields, then publish only selected metadata. */
-pg_status pg_file_update_metadata(pg_file *file,
+static pg_status pg_file_update_metadata_coordinated(pg_file *file,
 		const pg_metadata_options *options, pg_error *error)
 {
 	pg_status status;
@@ -577,4 +620,17 @@ pg_status pg_file_update_metadata(pg_file *file,
 	if (status == PG_COMMITTED && error)
 		error->cause = PG_IO;
 	return pg_file_delete_queued(file, status, error);
+}
+
+pg_status pg_file_update_metadata(pg_file *file,
+		const pg_metadata_options *options, pg_error *error)
+{
+	pg_context *context = file ? file->source->context : NULL;
+
+	pg_context_lock(context);
+	pg_status status = pg_file_update_metadata_coordinated(file, options,
+		error);
+
+	pg_context_unlock(context);
+	return status;
 }

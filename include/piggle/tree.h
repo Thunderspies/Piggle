@@ -23,7 +23,7 @@ typedef struct pg_tree_info {
 	size_t source_count;
 	uint32_t watch_mode;
 } pg_tree_info;
-/* Immediate snapshot, no I/O. Required out, zero on error. Control thread;
+/* Immediate snapshot, no I/O. Required out, zero on error. Workers allowed;
  * allowed in observer callbacks. Reports committed attachments and watch mode.
  */
 PG_API pg_status PG_CALL pg_tree_inspect(pg_tree *tree, pg_tree_info *out,
@@ -68,7 +68,8 @@ PG_API pg_status PG_CALL pg_tree_detach(
 		pg_error *error);
 /* Immediate source at attachment-order index, with owned reference.
  * END clears out. out required.
- * Enumeration is live, not a snapshot: serialize with tree control.
+ * Workers allowed. Each call is synchronized; enumeration remains live,
+ * not a snapshot across calls.
  */
 PG_API pg_status PG_CALL pg_tree_source(pg_tree *tree, size_t index,
 		pg_source **out, pg_error *error);
@@ -87,7 +88,7 @@ PG_API pg_status PG_CALL pg_tree_source(pg_tree *tree, size_t index,
  * empty files still verified.
  * Name/buffer/bytes borrow through return. Close all private handles; retain the
  * first error, report cleanup failure only if work succeeded. Serialize with
- * tree control; allowed during a read-only observer callback.
+ * this output slot; workers and read-only observer callbacks allowed.
  */
 PG_API pg_status PG_CALL pg_tree_read_all(pg_tree *tree,
 		const char *name, void *buffer, size_t capacity, size_t *bytes,
@@ -101,7 +102,7 @@ PG_API pg_status PG_CALL pg_tree_read_all(pg_tree *tree,
  * Publish out only on success after all private cleanup; failure frees private
  * bytes and leaves out empty. No NUL terminator. Empty success is OK/NULL/0;
  * release with pg_buffer_free. Name and output borrow through return. Same
- * tree control and callback rules as tree_read_all.
+ * threading and callback rules as tree_read_all.
  */
 PG_API pg_status PG_CALL pg_tree_read_all_alloc(pg_tree *tree,
 		const char *name, size_t max_bytes, pg_buffer *out,
@@ -152,7 +153,8 @@ PG_API pg_status PG_CALL pg_tree_unpack(
  * for requested tree scopes before selection. No implicit subtree request.
  * A directory at the exact name -> CONFLICT; missing -> NOT_FOUND.
  * Owned file, NULL on failure. Use source_find for a specific source;
- * native-path colon qualification is not part of this API.
+ * native-path colon qualification is not part of this API. Workers allowed;
+ * selection synchronizes with tree control.
  */
 PG_API pg_status PG_CALL pg_tree_find(
 		pg_tree *tree,
@@ -167,7 +169,8 @@ PG_API pg_status PG_CALL pg_tree_find(
  * Archive-only/empty trees need no request. Exact file -> CONFLICT; missing
  * directory -> empty cursor. Canonical lexical order; owned cursor retains
  * captured metadata. NATIVE watching reconciles pending tree hints first.
- * Listing does not create a watched scope.
+ * Listing does not create a watched scope. Workers allowed; snapshot capture
+ * synchronizes with tree control. Serialize each returned cursor.
  */
 PG_API pg_status PG_CALL pg_tree_files(
 		pg_tree *tree,
@@ -198,6 +201,7 @@ PG_API pg_status PG_CALL pg_tree_rescan(pg_tree *tree, pg_error *error);
  * rejection leaves it owned. Cleanup may block and report IO, but the
  * reference stays consumed.
  * Final release stops watching and discards queued reports without callbacks.
+ * Control thread; stop/join direct tree users before close.
  */
 PG_API pg_status PG_CALL pg_tree_close(
 		pg_tree **tree,

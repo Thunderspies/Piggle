@@ -47,3 +47,21 @@ Feature: Stable copy identity and metadata iteration
     And the retained file and cursor keep their metadata
     And unchanged retained files can still be read
     And tree lookup no longer selects that detached source
+
+  @HANDLE-007
+  Scenario: Workers traverse a tree while control updates its view
+    Given workers share a live tree with its control thread
+    When workers look up files and capture independent file and entry listings
+    And the control thread attaches, detaches or refreshes sources
+    Then each traversal captures a complete synchronized view
+    And captured cursors retain lexical order and original metadata
+    And workers can advance and close their own cursors and selected files
+    And named reads never switch selected copies on stale content
+
+  @HANDLE-008
+  Scenario: Callback work can traverse the tree on another thread
+    Given a watched tree has queued visible changes
+    When its observer starts and waits for a worker lookup and listing
+    Then the worker completes without an internal lock blocking the callback
+    And reports queued during the callback wait for the next poll
+    And mutation and recursive poll remain restricted
