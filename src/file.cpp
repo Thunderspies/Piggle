@@ -59,6 +59,9 @@ PG_API pg_status PG_CALL pg_file_read_all(pg_file *file, void *buffer,
 			status = pg_result(PG_IO, &work_error);
 			break;
 		}
+		/* The final nonempty read already verifies completion. */
+		if (status == PG_OK && count && total == file->info.logical_size)
+			break;
 	}
 	*bytes = total;
 	if (status == PG_END)
