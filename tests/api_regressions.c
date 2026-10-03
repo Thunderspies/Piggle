@@ -963,7 +963,9 @@ static int windows_subsecond(void)
 	CHECK(!set_native_time("root/a", ticks + 2000000));
 	STATUS(pg_reader_read(reader, bytes, sizeof(bytes), &count, &error),
 		PG_STALE);
-	CHECK(!count);
+	/* A failed transfer reports the bytes delivered before validation. */
+	CHECK(count == sizeof(bytes));
+	CHECK(!memcmp(bytes, "new", count));
 	STATUS(pg_reader_seek(native, 0, &error), PG_STALE);
 	STATUS(pg_source_rescan(source, &error), PG_OK);
 	STATUS(pg_source_find(source, "a", &file, &error), PG_OK);

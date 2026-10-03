@@ -273,3 +273,14 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lease")
 add_test(NAME api_lease COMMAND piggle_api_lease)
 set_tests_properties(api_lease PROPERTIES
 	WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lease" LABELS contract)
+
+add_executable(piggle_api_native_read api_native_read.c)
+target_link_libraries(piggle_api_native_read PRIVATE piggle::piggle)
+foreach(case IN ITEMS partial full empty)
+	set(case_dir "${CMAKE_CURRENT_BINARY_DIR}/native_read_${case}")
+	file(MAKE_DIRECTORY "${case_dir}")
+	add_test(NAME api_native_read_${case}
+		COMMAND piggle_api_native_read ${case})
+	set_tests_properties(api_native_read_${case} PROPERTIES
+		WORKING_DIRECTORY "${case_dir}" LABELS contract)
+endforeach()

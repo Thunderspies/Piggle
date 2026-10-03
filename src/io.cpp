@@ -1307,10 +1307,13 @@ static pg_status pg_reader_read_locked(
 		return pg_result(PG_INVALID, error);
 	if (!capacity)
 		return pg_result(PG_OK, error);
-	status = pg_reader_native_check(reader, &native_code);
-	if (status != PG_OK) {
-		reader->failed = 1;
-		return pg_native_result(status, native_code, error);
+	/* Native transfers validate once after reporting delivered bytes. */
+	if (archive || reader->position == reader->info.size) {
+		status = pg_reader_native_check(reader, &native_code);
+		if (status != PG_OK) {
+			reader->failed = 1;
+			return pg_native_result(status, native_code, error);
+		}
 	}
 	if (reader->position == reader->info.size) {
 		if (archive && !reader->verified) {
@@ -1360,22 +1363,22 @@ static pg_status pg_reader_read_locked(
 		*bytes = (size_t)count;
 		reader->position += (uint64_t)count;
 	}
-	if (reader->position == reader->info.size) {
+	if (!archive || reader->position == reader->info.size) {
 		status = pg_reader_native_check(reader, &native_code);
 		if (status != PG_OK) {
 			reader->failed = 1;
 			return pg_native_result(status, native_code, error);
 		}
-		if (archive) {
-			status = pg_archive_verify_payload(reader->fd,
-				(uint64_t)reader->identity.st_size,
-				&reader->file_info, reader->payload_offset, 0);
-			if (status != PG_OK) {
-				reader->failed = 1;
-				return pg_result(status, error);
-			}
-			reader->verified = 1;
+	}
+	if (archive && reader->position == reader->info.size) {
+		status = pg_archive_verify_payload(reader->fd,
+			(uint64_t)reader->identity.st_size,
+			&reader->file_info, reader->payload_offset, 0);
+		if (status != PG_OK) {
+			reader->failed = 1;
+			return pg_result(status, error);
 		}
+		reader->verified = 1;
 	}
 	return pg_result(PG_OK, error);
 }
