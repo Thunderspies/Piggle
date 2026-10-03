@@ -4162,7 +4162,7 @@ static pg_status pg_source_files_depth_coordinated(
 	pg_source_record **items = NULL;
 	pg_cursor *cursor;
 	char *canonical = NULL;
-	size_t required = 0, count = 0, i;
+	size_t required = 0, count = 0, i, capacity;
 	pg_status status;
 
 	if (!out)
@@ -4221,7 +4221,7 @@ static pg_status pg_source_files_depth_coordinated(
 	cursor->source = source;
 	cursor->context = source->context;
 	pg_context_child_add(cursor->context);
-	size_t capacity = recursive && count ? count : 16;
+	capacity = recursive && count ? count : 16;
 	cursor->files = (pg_file **)calloc(capacity, sizeof(*cursor->files));
 	if (!cursor->files) {
 		status = PG_NOMEM;
