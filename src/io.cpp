@@ -208,6 +208,11 @@ static pg_status pg_reader_native_check(pg_reader *reader, int *native_code)
 	}
 	if (!pg_native_same(&reader->identity, &current))
 		return PG_STALE;
+	/* Native readers retain their opened object across namespace changes.
+	 * PIGG/HOGG retain their namespace and archive validation.
+	 */
+	if (!reader->source || reader->source->format == PG_LOOSE)
+		return PG_OK;
 	if (lstat(reader->native_path, &current)) {
 		if (errno == ENOENT || errno == ENOTDIR)
 			return PG_STALE;
@@ -1187,8 +1192,6 @@ PG_API pg_status PG_CALL pg_reader_open_native(
 	pg_reader *reader;
 	int fd;
 	int flags = O_RDONLY;
-	pg_status path_status = PG_OK;
-	int path_code = 0;
 
 	if (!out)
 		return pg_result(PG_INVALID, error);
@@ -1253,15 +1256,7 @@ PG_API pg_status PG_CALL pg_reader_open_native(
 		close(fd);
 		return pg_result(PG_NOMEM, error);
 	}
-	reader->native_path = pg_native_absolute(native_path, &path_status,
-		&path_code);
-	if (!reader->native_path) {
-		free(reader);
-		close(fd);
-		return pg_native_result(path_status, path_code, error);
-	}
 	if (pg_context_children(context) == SIZE_MAX) {
-		free(reader->native_path);
 		free(reader);
 		close(fd);
 		return pg_result(PG_LIMIT, error);

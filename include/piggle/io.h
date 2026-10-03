@@ -8,6 +8,14 @@
 extern "C" {
 #endif
 
+/* Native/loose readers keep their opened physical object across rename,
+ * unlink and pathname replacement. All openers validate captured identity at
+ * setup and never retarget. Positive reads and seeks detect observable changes
+ * to the opened object's identity, size and mtime. Mutation errors may follow
+ * delivered bytes: discard them and close. Future lookups/opens see namespace
+ * changes; PIGG/HOGG readers retain strict namespace and archive validation.
+ */
+
 /* Open named visible content with one owned reader. Compose source_find,
  * reader_open and file_close; retain one selection, never retry/retarget.
  * representation is READ_LOGICAL (usual) or READ_STORED. Same lookup,

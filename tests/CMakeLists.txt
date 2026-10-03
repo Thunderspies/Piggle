@@ -294,3 +294,13 @@ if(WIN32)
 	set_tests_properties(api_windows_reader_setup PROPERTIES
 		WORKING_DIRECTORY "${case_dir}" LABELS contract)
 endif()
+
+if(WIN32)
+	add_executable(piggle_api_opened_object api_opened_object.c)
+	target_link_libraries(piggle_api_opened_object PRIVATE piggle::piggle)
+	set(case_dir "${CMAKE_CURRENT_BINARY_DIR}/opened_object")
+	file(MAKE_DIRECTORY "${case_dir}")
+	add_test(NAME api_opened_object COMMAND piggle_api_opened_object)
+	set_tests_properties(api_opened_object PROPERTIES
+		WORKING_DIRECTORY "${case_dir}" LABELS contract)
+endif()
