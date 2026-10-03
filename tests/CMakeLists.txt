@@ -284,3 +284,13 @@ foreach(case IN ITEMS partial full empty)
 	set_tests_properties(api_native_read_${case} PROPERTIES
 		WORKING_DIRECTORY "${case_dir}" LABELS contract)
 endforeach()
+
+if(WIN32)
+	add_executable(piggle_api_windows_reader api_windows_reader.c)
+	target_link_libraries(piggle_api_windows_reader PRIVATE piggle::piggle)
+	set(case_dir "${CMAKE_CURRENT_BINARY_DIR}/windows_reader_setup")
+	file(MAKE_DIRECTORY "${case_dir}")
+	add_test(NAME api_windows_reader_setup COMMAND piggle_api_windows_reader)
+	set_tests_properties(api_windows_reader_setup PROPERTIES
+		WORKING_DIRECTORY "${case_dir}" LABELS contract)
+endif()

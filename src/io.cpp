@@ -1212,7 +1212,13 @@ PG_API pg_status PG_CALL pg_reader_open_native(
 #ifdef O_NOFOLLOW
 	flags |= O_NOFOLLOW;
 #endif
+	struct stat opened;
+
+#ifdef _WIN32
+	fd = pg_win_open_capture(native_path, flags, 0666, &opened);
+#else
 	fd = open(native_path, flags);
+#endif
 	if (fd < 0) {
 		int code = errno;
 
@@ -1222,14 +1228,14 @@ PG_API pg_status PG_CALL pg_reader_open_native(
 			return pg_native_result(PG_NOT_FOUND, code, error);
 		return pg_native_result(PG_IO, code, error);
 	}
-	struct stat opened;
-
+#ifndef _WIN32
 	if (fstat(fd, &opened)) {
 		int code = errno;
 
 		close(fd);
 		return pg_native_result(PG_IO, code, error);
 	}
+#endif
 	if (!S_ISREG(opened.st_mode)
 #ifndef _WIN32
 	    || !pg_native_same(&identity, &opened)
