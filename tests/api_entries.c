@@ -103,8 +103,19 @@ static int loose_case(int tree_mode)
 	STATUS(pg_cursor_close(&files, &error), PG_OK);
 	STATUS(pg_source_entries(source, "nested", PG_ENTRIES_RECURSIVE,
 		&saved, &error), PG_OK);
+	pg_entry_cursor *names = NULL;
+	pg_entry_info captured;
+	STATUS(pg_source_entries(source, "nested", 0, &names, &error), PG_OK);
+	STATUS(pg_entry_cursor_next(names, &captured, &file, &error), PG_OK);
+	STATUS(pg_file_close(&file, &error), PG_OK);
 	CHECK(remove_dir("root/Nested/Void") == 0);
 	STATUS(pg_source_rescan(source, &error), PG_OK);
+	/* Metadata spans survive transferred-file cleanup and index
+	 * replacement. */
+	CHECK(!strcmp(captured.canonical_name, "nested/file"));
+	CHECK(!strcmp(captured.original_name, "Nested/File"));
+	CHECK(captured.size == sizeof(payload));
+	STATUS(pg_entry_cursor_close(&names, &error), PG_OK);
 	CHECK(next(saved, "nested/file", PG_ENTRY_FILE, 0) == 0);
 	CHECK(next(saved, "nested/void", PG_ENTRY_DIRECTORY, 0) == 0);
 	CHECK(end(saved) == 0);

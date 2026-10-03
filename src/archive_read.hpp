@@ -253,7 +253,7 @@ static inline pg_status pg_pigg_index(pg_source *source)
 			status = PG_CORRUPT;
 			goto cleanup;
 		}
-		copy = (pg_source_record *)calloc(1, sizeof(*copy));
+		copy = pg_record_archive_new();
 		if (!copy) {
 			status = PG_NOMEM;
 			goto cleanup;
@@ -279,28 +279,29 @@ static inline pg_status pg_pigg_index(pg_source *source)
 			goto cleanup;
 		}
 		if (header_id != UINT32_MAX && headers[header_id].size) {
-			copy->info.cached_header =
+			copy->archive->cached_header =
 				malloc(headers[header_id].size);
-			if (!copy->info.cached_header) {
+			if (!copy->archive->cached_header) {
 				free((void *)copy->info.original_name);
 				free((void *)copy->info.canonical_name);
 				free(copy);
 				status = PG_NOMEM;
 				goto cleanup;
 			}
-			memcpy((void *)copy->info.cached_header,
+			memcpy((void *)copy->archive->cached_header,
 				headers[header_id].data,
 				headers[header_id].size);
-			copy->info.cached_header_size = headers[header_id].size;
+			copy->archive->cached_header_size =
+				headers[header_id].size;
 		}
-		copy->info.archive_record = i;
+		copy->archive->archive_record = i;
 		copy->info.logical_size = pg_read_u32(record + 8);
-		copy->info.stored_size = stored_size;
+		copy->archive->stored_size = stored_size;
 		copy->info.mtime = (int32_t)pg_read_u32(record + 12);
-		copy->info.encoding = encoded_size ? PG_ZLIB : PG_LOGICAL;
-		copy->info.digest_kind = PG_DIGEST_MD5;
-		memcpy(copy->info.digest, record + 28, 16);
-		copy->payload_offset = payload_offset;
+		copy->archive->encoding = encoded_size ? PG_ZLIB : PG_LOGICAL;
+		copy->archive->digest_kind = PG_DIGEST_MD5;
+		memcpy(copy->archive->digest, record + 28, 16);
+		copy->archive->payload_offset = payload_offset;
 		*tail = copy;
 		tail = &copy->next;
 	}
@@ -676,7 +677,7 @@ static inline pg_status pg_hogg_index(pg_source *source)
 			status = PG_CORRUPT;
 			goto cleanup;
 		}
-		copy = (pg_source_record *)calloc(1, sizeof(*copy));
+		copy = pg_record_archive_new();
 		if (!copy) {
 			status = PG_NOMEM;
 			goto cleanup;
@@ -709,30 +710,30 @@ static inline pg_status pg_hogg_index(pg_source *source)
 			goto cleanup;
 		}
 		if (header_id != UINT32_MAX) {
-			copy->info.cached_header =
+			copy->archive->cached_header =
 				malloc(slots[header_id].size);
-			if (!copy->info.cached_header) {
+			if (!copy->archive->cached_header) {
 				free((void *)copy->info.original_name);
 				free((void *)copy->info.canonical_name);
 				free(copy);
 				status = PG_NOMEM;
 				goto cleanup;
 			}
-			memcpy((void *)copy->info.cached_header,
-				slots[header_id].data,
-				slots[header_id].size);
-			copy->info.cached_header_size = slots[header_id].size;
+			memcpy((void *)copy->archive->cached_header,
+				slots[header_id].data, slots[header_id].size);
+			copy->archive->cached_header_size =
+				slots[header_id].size;
 		}
-		copy->info.archive_record = i;
+		copy->archive->archive_record = i;
 		copy->info.logical_size = unpacked_size ? unpacked_size :
 			stored_size;
-		copy->info.stored_size = stored_size;
+		copy->archive->stored_size = stored_size;
 		copy->info.mtime = (int32_t)pg_read_u32(record + 12);
-		copy->info.encoding = unpacked_size ? PG_ZLIB : PG_LOGICAL;
-		copy->info.digest_kind = PG_DIGEST_MD5_32;
-		copy->info.checksum_domain = source->checksum_domain;
-		memcpy(copy->info.digest, record + 16, 4);
-		copy->payload_offset = payload_offset;
+		copy->archive->encoding = unpacked_size ? PG_ZLIB : PG_LOGICAL;
+		copy->archive->digest_kind = PG_DIGEST_MD5_32;
+		copy->archive->checksum_domain = source->checksum_domain;
+		memcpy(copy->archive->digest, record + 16, 4);
+		copy->archive->payload_offset = payload_offset;
 		*tail = copy;
 		tail = &copy->next;
 	}

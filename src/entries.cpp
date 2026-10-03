@@ -2,6 +2,7 @@
 #include "internal.hpp"
 
 struct pg_entry_item {
+	pg_source_record *names_record;
 	pg_entry_info info;
 	pg_file *file;
 	size_t rank;
@@ -114,8 +115,8 @@ static int pg_entry_in_prefix(const char *name, const char *prefix,
 }
 
 static pg_status pg_entry_add(pg_entry_cursor *cursor,
-		const pg_entry_info *info, pg_file *file, size_t rank,
-		int explicit_entry)
+	const pg_entry_info *info, pg_file *file, size_t rank,
+	int explicit_entry, pg_source_record *record = NULL)
 {
 	if (cursor->count == cursor->capacity) {
 		size_t capacity = cursor->capacity ? cursor->capacity * 2 : 16;
@@ -134,12 +135,28 @@ static pg_status pg_entry_add(pg_entry_cursor *cursor,
 	pg_entry_item item = {};
 
 	item.info = *info;
-	item.info.canonical_name = strdup(info->canonical_name);
-	item.info.original_name = strdup(info->original_name);
-	if (!item.info.canonical_name || !item.info.original_name) {
-		free((void *)item.info.canonical_name);
-		free((void *)item.info.original_name);
-		return PG_NOMEM;
+	if (file) record = file->names_record;
+	if (record && record->packed_names) {
+		pg_status status = pg_record_retain(record);
+		if (status != PG_OK) return status;
+		item.names_record = record;
+	} else {
+		size_t canonical = strlen(info->canonical_name) + 1;
+		size_t original =
+			strcmp(info->canonical_name, info->original_name)
+			? strlen(info->original_name) + 1
+			: 0;
+		if (original > SIZE_MAX - canonical) return PG_LIMIT;
+		char *names = (char *)malloc(canonical + original);
+		if (!names) return PG_NOMEM;
+		memcpy(names, info->canonical_name, canonical);
+		item.info.canonical_name = names;
+		item.info.original_name = names;
+		if (original) {
+			memcpy(names + canonical, info->original_name,
+				original);
+			item.info.original_name = names + canonical;
+		}
 	}
 	item.file = file;
 	item.rank = rank;
@@ -150,8 +167,10 @@ static pg_status pg_entry_add(pg_entry_cursor *cursor,
 
 static void pg_entry_dispose(pg_entry_item *item)
 {
-	free((void *)item->info.canonical_name);
-	free((void *)item->info.original_name);
+	if (item->names_record)
+		pg_record_release(item->names_record);
+	else
+		free((void *)item->info.canonical_name);
 	pg_file_close(&item->file, NULL);
 	memset(item, 0, sizeof(*item));
 }
@@ -187,12 +206,16 @@ static pg_status pg_entry_directories(pg_entry_cursor *cursor,
 	for (size_t index = 0; index < count && status == PG_OK; index++) {
 		pg_source_record *record = records[index];
 		pg_entry_info info = {};
-		char *name = strdup(record->info.canonical_name);
+		char local[512];
+		size_t bytes = strlen(record->info.canonical_name) + 1;
+		char *name =
+			bytes <= sizeof(local) ? local : (char *)malloc(bytes);
 
 		if (!name) {
 			status = PG_NOMEM;
 			break;
 		}
+		memcpy(name, record->info.canonical_name, bytes);
 		info.kind = PG_ENTRY_DIRECTORY;
 		info.source_id = source->id;
 		info.attributes = PG_ENTRY_IMPLIED |
@@ -222,7 +245,18 @@ static pg_status pg_entry_directories(pg_entry_cursor *cursor,
 			info.mtime = record->info.mtime;
 			status = pg_entry_add(cursor, &info, NULL, rank, 1);
 		}
-		free(name);
+		if (!(flags & PG_ENTRIES_RECURSIVE)) {
+			const char *relative =
+				name + (prefix ? strlen(prefix) + 1 : 0);
+			const char *slash = strchr(relative, '/');
+
+			if (slash)
+				index = pg_records_after_directory(records,
+						count, index, name,
+						(size_t)(slash - name)) -
+					1;
+		}
+		if (name != local) free(name);
 	}
 	return status;
 }
@@ -337,6 +371,109 @@ done:
 	return pg_result(status, error);
 }
 
+/* Capture an already ordered loose index without two intermediate cursors,
+ *
+ * implied-directory reconstruction, or sorting copied entry structures.
+ */
+static pg_status pg_loose_entries(pg_source *source, pg_tree *tree,
+	const char *prefix, uint32_t flags, pg_entry_cursor **out,
+	pg_error *error)
+{
+	char *canonical = NULL;
+	pg_entry_cursor *cursor = NULL;
+	pg_source_record **records;
+	size_t count, required;
+	pg_status status = PG_OK;
+	if (prefix && *prefix) {
+		status = pg_name_normalize(
+			source->context, prefix, NULL, 0, &required, NULL);
+		if (status != PG_CAPACITY) return pg_result(status, error);
+		canonical = (char *)malloc(required);
+		if (!canonical) return pg_result(PG_NOMEM, error);
+		status = pg_name_normalize(source->context, prefix, canonical,
+			required, &required, NULL);
+		if (status != PG_OK) goto done;
+	}
+	status = tree ? pg_tree_entry_records(tree, canonical,
+				(flags & PG_ENTRIES_RECURSIVE) != 0, &records,
+				&count, error)
+		      : pg_source_entry_records(source, canonical,
+				(flags & PG_ENTRIES_RECURSIVE) != 0, &records,
+				&count);
+	if (status != PG_OK) {
+		free(canonical);
+		return tree ? status : pg_result(status, error);
+	}
+	if (pg_context_children(source->context) == SIZE_MAX) {
+		status = PG_LIMIT;
+		goto done;
+	}
+	cursor = (pg_entry_cursor *)calloc(1, sizeof(*cursor));
+	if (!cursor) {
+		status = PG_NOMEM;
+		goto done;
+	}
+	cursor->context = source->context;
+	pg_context_child_add(cursor->context);
+	cursor->sources = (pg_source **)malloc(sizeof(*cursor->sources));
+	if (!cursor->sources) {
+		status = PG_NOMEM;
+		goto done;
+	}
+	status = pg_source_retain(source);
+	if (status != PG_OK) goto done;
+	cursor->sources[cursor->source_count++] = source;
+	for (size_t i = 0; i < count; i++) {
+		pg_source_record *record = records[i];
+		const char *name = record->info.canonical_name;
+		if (!(flags & PG_ENTRIES_RECURSIVE)) {
+			const char *relative =
+				name + (canonical ? strlen(canonical) + 1 : 0);
+			const char *slash = strchr(relative, '/');
+			if (slash) {
+				i = pg_records_after_directory(records, count,
+					    i, name, (size_t)(slash - name)) -
+					1;
+				continue;
+			}
+		}
+		pg_file *file = NULL;
+		pg_entry_info info = {};
+		info.kind = S_ISDIR(record->identity.st_mode)
+			? PG_ENTRY_DIRECTORY
+			: PG_ENTRY_FILE;
+		info.source_id = source->id;
+		info.canonical_name = name;
+		info.original_name = record->info.original_name;
+		info.size = record->info.logical_size;
+		info.mtime = record->info.mtime;
+		info.attributes = record->attributes;
+		if (info.kind == PG_ENTRY_FILE) {
+			status = pg_source_select(source, record, &file, error);
+			if (status != PG_OK) goto done;
+			if (tree) {
+				status = pg_tree_retain(tree);
+				if (status != PG_OK) {
+					pg_file_close(&file, NULL);
+					goto done;
+				}
+				file->origin_tree = tree;
+			}
+		}
+		status = pg_entry_add(cursor, &info, file, 0, 1, record);
+		if (status != PG_OK) {
+			pg_file_close(&file, NULL);
+			goto done;
+		}
+	}
+	*out = cursor;
+	cursor = NULL;
+done:
+	free(canonical);
+	pg_entry_cursor_close(&cursor, NULL);
+	return pg_result(status, error);
+}
+
 static pg_status PG_CALL pg_source_entries_coordinated(pg_source *source,
 		const char *prefix, uint32_t flags, pg_entry_cursor **out,
 		pg_error *error)
@@ -346,6 +483,9 @@ static pg_status PG_CALL pg_source_entries_coordinated(pg_source *source,
 		*out = NULL;
 	if (!out || !source || (flags & ~PG_ENTRIES_RECURSIVE))
 		return pg_result(PG_INVALID, error);
+	if (source->format == PG_LOOSE)
+		return pg_loose_entries(
+			source, NULL, prefix, flags, out, error);
 	pg_cursor *files = NULL;
 	pg_status status = pg_source_files_depth(source, prefix,
 		(flags & PG_ENTRIES_RECURSIVE) != 0, &files, error);
@@ -382,6 +522,9 @@ static pg_status PG_CALL pg_tree_entries_coordinated(pg_tree *tree,
 		*out = NULL;
 	if (!out || !tree || (flags & ~PG_ENTRIES_RECURSIVE))
 		return pg_result(PG_INVALID, error);
+	if (tree->count == 1 && tree->sources[0]->format == PG_LOOSE)
+		return pg_loose_entries(
+			tree->sources[0], tree, prefix, flags, out, error);
 	pg_cursor *files = NULL;
 	pg_status status = pg_tree_files_depth(tree, prefix,
 		(flags & PG_ENTRIES_RECURSIVE) != 0, &files, error);

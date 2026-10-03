@@ -777,28 +777,36 @@ static pg_status pg_tree_native_reconcile_roots(pg_tree *tree,
 			}
 			continue;
 		}
-		if (WaitForSingleObject(source->native_event, 0) !=
-			WAIT_OBJECT_0)
-			continue;
-		tree->native_dirty = 1;
-		source->native_armed = 0;
-		if (!GetOverlappedResult(source->native_watch,
-			&source->native_overlapped, &bytes, FALSE) ||
-		    !bytes) {
-			tree->loss_pending = 1;
-			tree->native_repair = 1;
-		}
-		if (bytes && !tree->native_repair) {
-			status = pg_tree_windows_hints(tree, source, bytes,
-				error);
+		/* Atomic publication can complete the first buffer on temporary
+		 * creation, leaving the final rename queued for the next arm.
+		 * Drain completed cuts before a lookup consults the retained
+		 * index. Bound work under continuous writers instead of
+		 * starving traversal.
+		 */
+		unsigned cuts = 0;
+		while (WaitForSingleObject(source->native_event, 0) ==
+			WAIT_OBJECT_0) {
+			if (cuts++ == 64) return pg_result(PG_RETRY, error);
+			tree->native_dirty = 1;
+			source->native_armed = 0;
+			if (!GetOverlappedResult(source->native_watch,
+				    &source->native_overlapped, &bytes,
+				    FALSE) ||
+				!bytes) {
+				tree->loss_pending = 1;
+				tree->native_repair = 1;
+			}
+			if (bytes && !tree->native_repair) {
+				status = pg_tree_windows_hints(
+					tree, source, bytes, error);
+				if (status != PG_OK) return status;
+			}
+			ResetEvent(source->native_event);
+			status = pg_tree_windows_arm(source, &native_code);
 			if (status != PG_OK)
-				return status;
+				return pg_native_result(
+					status, native_code, error);
 		}
-		ResetEvent(source->native_event);
-		status = pg_tree_windows_arm(source, &native_code);
-		if (status != PG_OK)
-			return pg_native_result(status, native_code,
-				error);
 	}
 #endif
 	if (!tree->native_dirty && !tree->native_repair)

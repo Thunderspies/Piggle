@@ -70,6 +70,12 @@ add_executable(piggle_api_entries api_entries.c)
 add_executable(piggle_api_threads api_threads.c)
 target_link_libraries(piggle_api_threads PRIVATE piggle::piggle
 	Threads::Threads)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/threads_context_close")
+add_test(NAME api_threads_context_close
+	COMMAND piggle_api_threads context_close)
+set_tests_properties(api_threads_context_close PROPERTIES
+	WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/threads_context_close"
+	LABELS contract TIMEOUT 60)
 set(thread_modes off scan)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
 	list(APPEND thread_modes native)
@@ -247,6 +253,9 @@ endforeach()
 add_executable(piggle_api_managed api_managed.c)
 target_link_libraries(piggle_api_managed PRIVATE piggle)
 set(managed_cases native native_root scan finite)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
+	list(APPEND managed_cases publication)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	list(APPEND managed_cases rename)
 endif()

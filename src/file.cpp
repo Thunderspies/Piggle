@@ -286,6 +286,10 @@ static pg_status pg_file_verify_locked(
 	if (status != PG_OK)
 		return pg_result(status, error);
 	identity = &file->source_identity;
+	if (file->source->format == PG_LOOSE) {
+		status = pg_file_prepare_native(file);
+		if (status != PG_OK) return pg_result(status, error);
+	}
 	if (file->source->format == PG_HOGG10) {
 		pg_source_record *record;
 
@@ -297,7 +301,7 @@ static pg_status pg_file_verify_locked(
 				break;
 		if (!record)
 			return pg_result(PG_STALE, error);
-		offset = record->payload_offset;
+		offset = record->archive->payload_offset;
 		identity = &file->source->identity;
 	}
 	fd = open(file->source->format == PG_LOOSE ?
@@ -402,6 +406,8 @@ static pg_status PG_CALL pg_file_delete_coordinated(
 		return pg_result(PG_UNSUPPORTED, error);
 	if (file->source->live_writers)
 		return pg_result(PG_BUSY, error);
+	status = pg_file_prepare_native(file);
+	if (status != PG_OK) return pg_result(status, error);
 	status = pg_native_parent_open(file->native_path, 0,
 		&parent, &leaf, &native_code);
 	if (status != PG_OK)
@@ -442,6 +448,21 @@ PG_API pg_status PG_CALL pg_file_delete(
 	return status;
 }
 
+pg_status pg_file_prepare_native(pg_file *file)
+{
+	if (file->native_path) return PG_OK;
+	size_t root = strlen(file->source->native_path);
+	size_t original = strlen(file->info.original_name) + 1;
+	if (root > SIZE_MAX - original - 1) return PG_LIMIT;
+	char *path = (char *)malloc(root + original + 1);
+	if (!path) return PG_NOMEM;
+	memcpy(path, file->source->native_path, root);
+	path[root] = '/';
+	memcpy(path + root + 1, file->info.original_name, original);
+	file->native_path = path;
+	return PG_OK;
+}
+
 /* Accept a null owned handle as a no-op. */
 /* Check close constraints; release resources and references. */
 /* Clear the owned pointer once close is accepted. */
@@ -460,10 +481,16 @@ static pg_status PG_CALL pg_file_close_coordinated(
 	owned = *file;
 	*file = NULL;
 	pg_tree *origin = owned->origin_tree;
-	free((void *)owned->info.canonical_name);
-	free((void *)owned->info.original_name);
-	free((void *)owned->info.cached_header);
-	free(owned->native_path);
+	if (owned->names_record) {
+		free(owned->native_path);
+		pg_record_release(owned->names_record);
+	}
+	if (!owned->packed) {
+		free((void *)owned->info.canonical_name);
+		free((void *)owned->info.original_name);
+		free((void *)owned->info.cached_header);
+		free(owned->native_path);
+	}
 	status = pg_source_release(owned->source, &native_code);
 	free(owned);
 	if (origin)
@@ -580,6 +607,8 @@ static pg_status pg_file_update_metadata_coordinated(pg_file *file,
 	if ((options->fields & PG_METADATA_MTIME) &&
 	    (int64_t)(time_t)options->mtime != options->mtime)
 		return pg_result(PG_LIMIT, error);
+	status = pg_file_prepare_native(file);
+	if (status != PG_OK) return pg_result(status, error);
 	status = pg_native_parent_open(file->native_path, 0, &parent, &leaf,
 		&native_code);
 	if (status != PG_OK)

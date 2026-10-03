@@ -76,6 +76,7 @@ struct pg_context {
 	size_t children;
 	pg_source *sources;
 #ifdef _WIN32
+	HANDLE record_heap;
 	CRITICAL_SECTION coordination;
 #else
 	pthread_mutex_t coordination;
@@ -103,14 +104,222 @@ static inline void pg_context_child_drop(pg_context *context)
 	pg_atomic_decrement(&context->children);
 }
 
-struct pg_source_record {
-	pg_source_record *next;
-	uint32_t attributes;
-	pg_file_info info;
-	uint64_t payload_offset;
-	char *native_path;
-	struct stat identity;
+/* Loose records need file identity and nanosecond precision, not a second
+ * copy of size/mtime or unused Windows stat fields for every indexed name.
+ */
+#ifdef _WIN32
+struct pg_record_identity {
+	uint64_t st_dev, st_ino;
+	uint32_t st_mtime_nsec, st_mode;
 };
+#else
+typedef struct stat pg_record_identity;
+#endif
+
+/* Loose records contain only their physical metadata. Archive-only payload
+ * details are stored inline after archive records, never after loose records.
+ */
+struct pg_record_info {
+	pg_id copy_id;
+	uint64_t copy_generation;
+	const char *canonical_name, *original_name;
+	uint64_t logical_size;
+	int64_t mtime;
+};
+struct pg_record_archive {
+	uint64_t archive_record, stored_size, payload_offset;
+	uint32_t encoding, digest_kind, checksum_domain;
+	uint8_t digest[16];
+	const void *cached_header;
+	size_t cached_header_size;
+};
+struct pg_source_record {
+	pg_record_info info;
+	pg_record_identity identity;
+	size_t extra_refs;
+	pg_source_record *next;
+	pg_record_archive *archive;
+	uint32_t attributes;
+	int packed_names;
+#ifdef _WIN32
+	HANDLE native_heap;
+#endif
+};
+
+static inline pg_source_record *pg_record_archive_new()
+{
+	pg_source_record *record = (pg_source_record *)calloc(
+		1, sizeof(*record) + sizeof(pg_record_archive));
+	if (record) record->archive = (pg_record_archive *)(record + 1);
+	return record;
+}
+static inline pg_file_info pg_record_file_info(const pg_source_record *record,
+	pg_id source_id, uint64_t source_generation)
+{
+	pg_file_info info = {};
+	info.source_id = source_id;
+	info.copy_id = record->info.copy_id;
+	info.source_generation = source_generation;
+	info.copy_generation = record->info.copy_generation;
+	info.canonical_name = record->info.canonical_name;
+	info.original_name = record->info.original_name;
+	info.logical_size = record->info.logical_size;
+	info.mtime = record->info.mtime;
+	info.archive_record = UINT64_MAX;
+	info.stored_size = info.logical_size;
+	info.encoding = PG_LOGICAL;
+	if (record->archive) {
+		info.archive_record = record->archive->archive_record;
+		info.stored_size = record->archive->stored_size;
+		info.encoding = record->archive->encoding;
+		info.digest_kind = record->archive->digest_kind;
+		info.checksum_domain = record->archive->checksum_domain;
+		memcpy(info.digest, record->archive->digest,
+			sizeof(info.digest));
+		info.cached_header = record->archive->cached_header;
+		info.cached_header_size = record->archive->cached_header_size;
+	}
+	return info;
+}
+
+/* Sorted descendants share one contiguous prefix; skip it for child lists. */
+static inline size_t pg_records_after_directory(pg_source_record **items,
+	size_t count, size_t begin, const char *name, size_t length)
+{
+	while (begin < count) {
+		size_t middle = begin + (count - begin) / 2;
+		const char *candidate = items[middle]->info.canonical_name;
+
+		if (!strncmp(candidate, name, length) &&
+			candidate[length] == '/')
+			begin = middle + 1;
+		else
+			count = middle;
+	}
+	return begin;
+}
+
+static inline void pg_record_identity_set(
+	pg_source_record *record, const struct stat *state)
+{
+#ifdef _WIN32
+	record->identity.st_dev = state->st_dev;
+	record->identity.st_ino = state->st_ino;
+	record->identity.st_mode = state->st_mode;
+	record->identity.st_mtime_nsec = state->st_mtime_nsec;
+#else
+	record->identity = *state;
+#endif
+}
+
+static inline struct stat pg_record_stat(const pg_source_record *record)
+{
+#ifdef _WIN32
+	struct stat state = {};
+
+	state.st_dev = record->identity.st_dev;
+	state.st_ino = record->identity.st_ino;
+	state.st_mode = record->identity.st_mode;
+	state.st_size = (int64_t)record->info.logical_size;
+	state.st_mtime = record->info.mtime;
+	state.st_mtime_nsec = record->identity.st_mtime_nsec;
+	return state;
+#else
+	return record->identity;
+#endif
+}
+
+/* Loose indexes retain relative names only. A captured file builds its native
+ * path from the stable source root. Packed names share the record allocation.
+ */
+static inline void pg_record_names_free(pg_source_record *record)
+{
+	if (record->packed_names) return;
+	if (record->info.canonical_name != record->info.original_name)
+		free((void *)record->info.canonical_name);
+	free((void *)record->info.original_name);
+}
+
+/* Context coordination protects record-name references held by snapshots. */
+static inline pg_status pg_record_retain(pg_source_record *record)
+{
+	if (record->extra_refs == SIZE_MAX) return PG_LIMIT;
+	record->extra_refs++;
+	return PG_OK;
+}
+
+static inline void pg_record_release(pg_source_record *record)
+{
+	if (record->extra_refs) {
+		record->extra_refs--;
+		return;
+	}
+	pg_record_names_free(record);
+	if (record->archive) free((void *)record->archive->cached_header);
+#ifdef _WIN32
+	if (record->native_heap) {
+		HeapFree(record->native_heap, 0, record);
+		return;
+	}
+#endif
+	free(record);
+}
+
+static inline int pg_record_native_names(
+	pg_source_record *record, const char *canonical, const char *original)
+{
+	record->info.original_name = strdup(original);
+	record->info.canonical_name = !strcmp(canonical, original)
+		? record->info.original_name
+		: strdup(canonical);
+	return record->info.original_name && record->info.canonical_name;
+}
+
+static inline pg_source_record *pg_record_native_new(
+	pg_context *context, const char *canonical, const char *original)
+{
+	size_t original_size = strlen(original) + 1;
+	size_t canonical_size =
+		strcmp(canonical, original) ? strlen(canonical) + 1 : 0;
+	if (original_size > SIZE_MAX - sizeof(pg_source_record) ||
+		canonical_size >
+			SIZE_MAX - sizeof(pg_source_record) - original_size)
+		return NULL;
+	size_t bytes =
+		sizeof(pg_source_record) + original_size + canonical_size;
+#ifdef _WIN32
+	/* Isolate persistent names from short-lived client parser allocations.
+
+	 * * Context coordination protects lazy heap creation and record
+	 * ownership.
+	 */
+	if (!context->record_heap) {
+		HANDLE heap = HeapCreate(0, 0, 0);
+		if (!heap) return NULL;
+		ULONG compatibility = 2;
+		HeapSetInformation(heap, HeapCompatibilityInformation,
+			&compatibility, sizeof(compatibility));
+		context->record_heap = heap;
+	}
+	pg_source_record *record = (pg_source_record *)HeapAlloc(
+		context->record_heap, HEAP_ZERO_MEMORY, bytes);
+	if (record) record->native_heap = context->record_heap;
+#else
+	(void)context;
+	pg_source_record *record = (pg_source_record *)calloc(1, bytes);
+#endif
+	if (!record) return NULL;
+	char *names = (char *)(record + 1);
+	memcpy(names, original, original_size);
+	record->info.original_name = names;
+	record->info.canonical_name = names;
+	if (canonical_size) {
+		memcpy(names + original_size, canonical, canonical_size);
+		record->info.canonical_name = names + original_size;
+	}
+	record->packed_names = 1;
+	return record;
+}
 
 /* Order a name against the contiguous prefix/ descendant range. */
 static inline int pg_descendant_order(const char *name, const char *prefix)
@@ -326,6 +535,8 @@ pg_status pg_tree_control_status(const pg_tree *tree, int mutation);
 pg_status pg_source_control_status(const pg_source *source, int mutation);
 
 struct pg_file {
+	pg_source_record *names_record;
+	int packed;
 	pg_source *source;
 	uint32_t attributes;
 	pg_tree *origin_tree;
@@ -334,6 +545,9 @@ struct pg_file {
 	struct stat source_identity;
 	char *native_path;
 };
+
+/* Materialize a native filename only for payload or mutation operations. */
+extern "C" pg_status pg_file_prepare_native(pg_file *file);
 
 struct pg_cursor {
 	pg_context *context;
@@ -422,6 +636,13 @@ extern "C" pg_status pg_source_rebind_root(pg_source *source,
 extern "C" void pg_source_rebind_finish(pg_root_binding *saved, int commit);
 extern "C" pg_status pg_source_select(pg_source *source,
 		pg_source_record *selected, pg_file **out, pg_error *error);
+
+extern "C" pg_status pg_source_entry_records(pg_source *source,
+	const char *prefix, int recursive, pg_source_record ***out,
+	size_t *count);
+
+extern "C" pg_status pg_tree_entry_records(pg_tree *tree, const char *prefix,
+	int recursive, pg_source_record ***out, size_t *count, pg_error *error);
 extern "C" pg_status pg_source_refresh_name(pg_source *source,
 		const char *name, int recursive, pg_error *error);
 pg_status pg_tree_native_reconcile(pg_tree *tree, pg_error *error);

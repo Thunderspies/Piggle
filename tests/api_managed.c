@@ -151,8 +151,52 @@ static int rename_directory(void)
 	return 0;
 }
 
+static int atomic_publication(void)
+{
+	pg_context *context = NULL;
+	pg_tree *tree = NULL;
+	pg_source_spec spec = {"root", {PG_LOOSE, PG_READ, 0}};
+	pg_error error;
+
+	CHECK(!write_text("root/a", "old"));
+	STATUS(pg_context_open(&context, &error), PG_OK);
+	STATUS(pg_tree_open(context, &spec, 1, &tree, &error), PG_OK);
+	STATUS(pg_tree_manage(tree, NULL, PG_DISCOVER_RECURSIVE, &error),
+		PG_OK);
+	STATUS(pg_tree_discover(tree, NULL, PG_DISCOVER_RECURSIVE, &error),
+		PG_OK);
+	STATUS(pg_tree_watch(tree, PG_WATCH_NATIVE, &error), PG_OK);
+	for (unsigned i = 0; i < 32; i++) {
+		pg_file *file = NULL;
+		pg_file_info info;
+		char text[64];
+
+		memset(text, 'a', i + 4);
+		text[i + 4] = 0;
+		CHECK(!write_text("root/temporary", text));
+#ifdef _WIN32
+		CHECK(MoveFileExA(
+			"root/temporary", "root/a", MOVEFILE_REPLACE_EXISTING));
+		Sleep(30);
+#else
+		CHECK(!rename("root/temporary", "root/a"));
+#endif
+		/* First lookup must drain the temporary and publication cuts.
+		 */
+		STATUS(pg_tree_find(tree, "a", &file, &error), PG_OK);
+		STATUS(pg_file_inspect(file, &info, &error), PG_OK);
+		CHECK(info.logical_size == i + 4);
+		STATUS(pg_file_close(&file, &error), PG_OK);
+	}
+	STATUS(pg_tree_close(&tree, &error), PG_OK);
+	STATUS(pg_context_close(&context, &error), PG_OK);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
+	if (argc > 1 && !strcmp(argv[1], "publication"))
+		return atomic_publication();
 	if (argc > 1 && !strcmp(argv[1], "finite"))
 		return finite_cut();
 	if (argc > 1 && !strcmp(argv[1], "rename"))
