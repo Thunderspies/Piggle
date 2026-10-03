@@ -129,15 +129,26 @@ static inline HANDLE pg_win_create_file(const char *path, DWORD access,
 		DWORD sharing, LPSECURITY_ATTRIBUTES security, DWORD creation,
 		DWORD flags, HANDLE template_file)
 {
-	WCHAR *wide = pg_win_utf16(path);
+	/* Common paths need one conversion and no temporary heap storage. */
+	WCHAR storage[MAX_PATH];
+	WCHAR *wide = storage;
 
-	if (!wide)
-		return INVALID_HANDLE_VALUE;
+	if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+		storage, MAX_PATH)) {
+		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+			errno = EINVAL;
+			return INVALID_HANDLE_VALUE;
+		}
+		wide = pg_win_utf16(path);
+		if (!wide)
+			return INVALID_HANDLE_VALUE;
+	}
 	HANDLE result = CreateFileW(wide, access, sharing, security, creation,
 		flags, template_file);
 	DWORD code = GetLastError();
 
-	free(wide);
+	if (wide != storage)
+		free(wide);
 	SetLastError(code);
 	return result;
 }
@@ -302,8 +313,42 @@ static inline char *pg_win_at_path(int parent, const char *leaf)
 	return path;
 }
 
-static inline int pg_win_open(const char *path, int flags,
-		int mode = 0666)
+/* Convert metadata captured from the exact opened handle. */
+static inline void pg_win_stat_from_info(
+		const BY_HANDLE_FILE_INFORMATION *info,
+		struct pg_win_stat_type *state)
+{
+	uint64_t modified;
+
+	state->st_dev = info->dwVolumeSerialNumber;
+	state->st_ino =
+		((uint64_t)info->nFileIndexHigh << 32) |
+		info->nFileIndexLow;
+	state->st_size = info->dwFileAttributes &
+		FILE_ATTRIBUTE_DIRECTORY ? 0 :
+		((uint64_t)info->nFileSizeHigh << 32) |
+		info->nFileSizeLow;
+	modified = ((uint64_t)info->ftLastWriteTime.dwHighDateTime <<
+		32) | info->ftLastWriteTime.dwLowDateTime;
+	state->st_mtime = (int64_t)(modified / 10000000ULL) -
+		11644473600LL;
+	state->st_mtime_nsec = (uint32_t)(modified % 10000000ULL) * 100u;
+	state->st_atime = state->st_mtime;
+	state->st_ctime = state->st_mtime;
+	state->st_mode = info->dwFileAttributes &
+		FILE_ATTRIBUTE_DIRECTORY ? _S_IFDIR : _S_IFREG;
+	if (!(info->dwFileAttributes & FILE_ATTRIBUTE_READONLY))
+		state->st_mode |= _S_IWRITE;
+	state->st_mode |= _S_IREAD;
+	if (info->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+		state->st_mode = 0;
+	state->st_nlink = info->nNumberOfLinks;
+	state->st_attributes = info->dwFileAttributes;
+}
+
+/* Optionally return the identity already queried during open. */
+static inline int pg_win_open_capture(const char *path, int flags,
+		int mode, struct pg_win_stat_type *state)
 {
 	DWORD access = flags & O_RDWR ? GENERIC_READ | GENERIC_WRITE :
 		flags & O_WRONLY ? GENERIC_WRITE : GENERIC_READ;
@@ -352,7 +397,15 @@ static inline int pg_win_open(const char *path, int flags,
 		_O_BINARY);
 	if (fd < 0)
 		CloseHandle(handle);
+	else if (state)
+		pg_win_stat_from_info(&info, state);
 	return fd;
+}
+
+static inline int pg_win_open(const char *path, int flags,
+		int mode = 0666)
+{
+	return pg_win_open_capture(path, flags, mode, NULL);
 }
 
 static inline int pg_win_openat(int parent, const char *leaf,
@@ -405,36 +458,12 @@ static inline int pg_win_fill_identity(HANDLE handle,
 		struct pg_win_stat_type *state)
 {
 	BY_HANDLE_FILE_INFORMATION info;
-	uint64_t modified;
 
 	if (!GetFileInformationByHandle(handle, &info)) {
 		pg_win_errno(GetLastError());
 		return -1;
 	}
-	state->st_dev = info.dwVolumeSerialNumber;
-	state->st_ino =
-		((uint64_t)info.nFileIndexHigh << 32) |
-		info.nFileIndexLow;
-	state->st_size = info.dwFileAttributes &
-		FILE_ATTRIBUTE_DIRECTORY ? 0 :
-		((uint64_t)info.nFileSizeHigh << 32) |
-		info.nFileSizeLow;
-	modified = ((uint64_t)info.ftLastWriteTime.dwHighDateTime <<
-		32) | info.ftLastWriteTime.dwLowDateTime;
-	state->st_mtime = (int64_t)(modified / 10000000ULL) -
-		11644473600LL;
-	state->st_mtime_nsec = (uint32_t)(modified % 10000000ULL) * 100u;
-	state->st_atime = state->st_mtime;
-	state->st_ctime = state->st_mtime;
-	state->st_mode = info.dwFileAttributes &
-		FILE_ATTRIBUTE_DIRECTORY ? _S_IFDIR : _S_IFREG;
-	if (!(info.dwFileAttributes & FILE_ATTRIBUTE_READONLY))
-		state->st_mode |= _S_IWRITE;
-	state->st_mode |= _S_IREAD;
-	if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
-		state->st_mode = 0;
-	state->st_nlink = info.nNumberOfLinks;
-	state->st_attributes = info.dwFileAttributes;
+	pg_win_stat_from_info(&info, state);
 	return 0;
 }
 
