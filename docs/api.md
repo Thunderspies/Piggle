@@ -350,6 +350,31 @@ still validates decoding, logical length and the available profile-selected
 digest. There is no unchecked extraction mode. An independent reader does not move another
 reader. Native readers capture one regular file's identity, size and timestamp.
 
+Native readers remain attached to the physical file object opened at setup.
+Rename, unlink or pathname replacement after a successful open does not by
+itself invalidate that reader. Future lookups and opens observe the new
+namespace state. Opening an old selected copy still checks its captured
+identity against the object actually opened and reports `STALE` on replacement;
+an existing reader never retargets. This behavior applies to native readers
+opened directly, from a selected loose file, from a loose source or from a tree.
+There is no build setting or per-reader switch, and the C ABI is unchanged.
+
+Positive native reads and seeks check the opened object's identity, size and
+modification time, including subsecond time where supported. Observable
+in-place writes, growth and truncation report `STALE`; an error can follow
+delivered bytes, which callers must discard. Metadata checks do not freeze
+content or detect every transient rewrite. Independent readers have independent
+positions. Namespace/tree watching remains separate and is not required for
+content validation. PIGG and HOGG readers retain their existing strict namespace,
+generation, digest, encoding and logical-length verification behavior.
+No payload cache, global handle cache or per-discovered-file allocation is added.
+
+Previously, pathname changes alone made an open native reader stale. Consumers
+that require namespace invalidation must observe future lookups or tree changes
+instead of relying on an existing reader to follow the pathname. An open reader
+continues consuming its original physical object until close or observable
+mutation of that object.
+
 Positive reads return up to capacity. The final nonempty read validates before
 OK; completed OK with positive capacity always delivers at least one byte.
 Subsequent positive reads return END/0. Empty files validate and return END/0

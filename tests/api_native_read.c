@@ -13,8 +13,8 @@ static int changed_reader(size_t capacity, int empty)
 		uint64_t position;
 		CHECK(clear_file("moved") == 0);
 		CHECK(put_bytes("input", original, empty ? 0 : 8) == 0);
-		STATUS(pg_reader_open_native(context, "input", &reader,
-			&error), PG_OK);
+		STATUS(pg_reader_open_native(context, "input", &reader, &error),
+		       PG_OK);
 		switch (mutation) {
 		case 0:
 			CHECK(put_bytes("input", "replacement grows", 17) == 0);
@@ -34,24 +34,42 @@ static int changed_reader(size_t capacity, int empty)
 			break;
 		}
 		memset(bytes, 0xa5, sizeof(bytes));
+		int namespace_change = mutation >= 2;
 		STATUS(pg_reader_read(reader, bytes, capacity, &count, &error),
-			PG_STALE);
+		       namespace_change ? (empty ? PG_END : PG_OK) : PG_STALE);
 		if (empty) {
 			CHECK(count == 0 && bytes[0] == 0xa5);
 		} else {
-			size_t expected = mutation == 1 ? 1 :
-				(capacity < 8 ? capacity : 8);
+			size_t expected =
+			    mutation == 1 ? 1 : (capacity < 8 ? capacity : 8);
 			CHECK(count == expected);
-			CHECK(!memcmp(bytes, mutation == 0 ? "replacement" :
-				mutation == 1 ? "x" : original, count));
+			CHECK(!memcmp(bytes,
+				      mutation == 0   ? "replacement"
+				      : mutation == 1 ? "x"
+						      : original,
+				      count));
 			CHECK(bytes[count] == 0xa5);
 		}
 		STATUS(pg_reader_tell(reader, &position, &error), PG_OK);
 		CHECK(position == count);
-		STATUS(pg_reader_read(reader, bytes, capacity, &count, &error),
-			PG_INVALID);
-		CHECK(count == 0);
-		STATUS(pg_reader_seek(reader, 0, &error), PG_INVALID);
+		if (namespace_change) {
+			STATUS(pg_reader_seek(reader, 0, &error), PG_OK);
+			STATUS(pg_reader_read(reader, bytes, sizeof(bytes),
+					      &count, &error),
+			       empty ? PG_END : PG_OK);
+			CHECK(count == (empty ? 0 : 8));
+			CHECK(empty || !memcmp(bytes, original, count));
+			STATUS(pg_reader_read(reader, bytes, sizeof(bytes),
+					      &count, &error),
+			       PG_END);
+			CHECK(count == 0);
+		} else {
+			STATUS(pg_reader_read(reader, bytes, capacity, &count,
+					      &error),
+			       PG_INVALID);
+			CHECK(count == 0);
+			STATUS(pg_reader_seek(reader, 0, &error), PG_INVALID);
+		}
 		STATUS(pg_reader_close(&reader, &error), PG_OK);
 	}
 	STATUS(pg_context_close(&context, &error), PG_OK);
