@@ -18,8 +18,8 @@ static inline pg_status pg_native_parent_open(const char *absolute,
 	*parent_fd = -1;
 	*leaf = NULL;
 	if (!separator || !separator[1] ||
-	    strcmp(separator + 1, ".") == 0 ||
-	    strcmp(separator + 1, "..") == 0)
+		strcmp(separator + 1, ".") == 0 ||
+		strcmp(separator + 1, "..") == 0)
 		return PG_INVALID;
 	length = (size_t)(separator - absolute);
 	if (length == 2 && absolute[1] == ':')
@@ -33,19 +33,19 @@ static inline pg_status pg_native_parent_open(const char *absolute,
 		char held;
 
 		if (i != length && parent_path[i] != '/' &&
-		    parent_path[i] != '\\')
+			parent_path[i] != '\\')
 			continue;
 		held = parent_path[i];
 		parent_path[i] = '\0';
 		DWORD attributes = pg_win_attributes(parent_path);
 
 		if (attributes != INVALID_FILE_ATTRIBUTES &&
-		    !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+			!(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
 			free(parent_path);
 			return PG_CONFLICT;
 		}
 		if (attributes != INVALID_FILE_ATTRIBUTES &&
-		    (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+			(attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
 			char *resolved = pg_win_realpath(parent_path,
 				NULL);
 			int same = resolved &&
@@ -58,9 +58,9 @@ static inline pg_status pg_native_parent_open(const char *absolute,
 			}
 		}
 		if (create &&
-		    attributes == INVALID_FILE_ATTRIBUTES &&
-		    !pg_win_create_directory(parent_path, NULL) &&
-		    GetLastError() != ERROR_ALREADY_EXISTS) {
+			attributes == INVALID_FILE_ATTRIBUTES &&
+			!pg_win_create_directory(parent_path, NULL) &&
+			GetLastError() != ERROR_ALREADY_EXISTS) {
 			*native_code = (int)GetLastError();
 			free(parent_path);
 			return PG_IO;
@@ -116,7 +116,8 @@ static inline pg_status pg_native_parent_open(const char *absolute,
 		next = openat(parent, component,
 			O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 		if (next < 0 && errno == ENOENT && create) {
-			if (mkdirat(parent, component, 0777) && errno != EEXIST) {
+			if (mkdirat(parent, component, 0777) &&
+				errno != EEXIST) {
 				*native_code = errno;
 				status = PG_IO;
 				break;
@@ -136,8 +137,8 @@ static inline pg_status pg_native_parent_open(const char *absolute,
 		component = separator + 1;
 	}
 	if (status == PG_OK && (!*component ||
-	    strcmp(component, ".") == 0 ||
-	    strcmp(component, "..") == 0))
+		strcmp(component, ".") == 0 ||
+		strcmp(component, "..") == 0))
 		status = PG_INVALID;
 	if (status == PG_OK) {
 		*leaf = (char *)malloc(strlen(component) + 1);
@@ -186,12 +187,12 @@ static inline pg_status pg_native_alias(pg_context *context, int parent,
 		return PG_IO;
 	}
 	for (source = context->sources; source;
-	     source = source->next_in_context) {
+		source = source->next_in_context) {
 		if (source == allowed_source)
 			continue;
 		if (source->format != PG_LOOSE && exists &&
-		    source->identity.st_dev == target->st_dev &&
-		    source->identity.st_ino == target->st_ino) {
+			source->identity.st_dev == target->st_dev &&
+			source->identity.st_ino == target->st_ino) {
 			close(walk);
 			return PG_CONFLICT;
 		}
@@ -206,12 +207,12 @@ static inline pg_status pg_native_alias(pg_context *context, int parent,
 			return PG_IO;
 		}
 		for (source = context->sources; source;
-		     source = source->next_in_context) {
+			source = source->next_in_context) {
 			if (source == allowed_source)
 				continue;
 			if (source->format == PG_LOOSE &&
-			    source->identity.st_dev == current.st_dev &&
-			    source->identity.st_ino == current.st_ino) {
+				source->identity.st_dev == current.st_dev &&
+				source->identity.st_ino == current.st_ino) {
 				close(walk);
 				return PG_CONFLICT;
 			}
@@ -227,7 +228,7 @@ static inline pg_status pg_native_alias(pg_context *context, int parent,
 		}
 		close(walk);
 		if (ancestor.st_dev == current.st_dev &&
-		    ancestor.st_ino == current.st_ino) {
+			ancestor.st_ino == current.st_ino) {
 			close(next);
 			return PG_OK;
 		}

@@ -557,9 +557,9 @@ static inline const char *pg_native_basename(const char *path)
 	for (; *path; path++) {
 		if (*path == '/'
 #ifdef _WIN32
-		    || *path == '\\'
+			|| *path == '\\'
 #endif
-		    )
+			)
 			leaf = path + 1;
 	}
 	return leaf;

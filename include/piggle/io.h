@@ -190,8 +190,8 @@ PG_API pg_status PG_CALL pg_unpack_target_close(
 /* Stage all input bytes sequentially; no append/seek/in-place edit. NULL
  * buffer allowed only at size=0; empty spans are never accessed. bytes
  * required, exact even on failure; OK means all input was accepted.
- * Buffer/count borrowed through return. Excess declared input -> INVALID. A failed
- * accepted write makes writer abort-only.
+ * Buffer/count borrowed through return. Excess declared input -> INVALID.
+ * A failed accepted write makes writer abort-only.
  * No publication; only submit new input after this call returns.
  */
 PG_API pg_status PG_CALL pg_writer_write(

@@ -7,19 +7,19 @@ PIGG v2 archives, and HOGG v10 archives into an ordered virtual file tree.
 The library exists to make those storage formats usable through one explicit,
 portable interface. It supports whole-file and streaming I/O, archive creation,
 ordered overlays, and caller-polled change reporting through a C11 API with a
-procedural C++11 interface.
+procedural C++17 interface.
 
 ## Quickstart
 
-Piggle requires CMake 3.20 or newer, C11 and C++11 compilers, and a build tool
+Piggle requires CMake 3.24 or newer, C11 and C++17 compilers, and a build tool
 supported by CMake. CPM fetches the compression dependency during the first
 configure.
 
 From the repository root, configure and build Piggle:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
+cmake --preset default
+cmake --build --preset default --parallel
 ```
 
 To use Piggle from another CMake project, add it as a subdirectory and link the
@@ -59,13 +59,26 @@ The default top-level build includes the command-line tool and tests. Run the
 complete test suite from the repository root:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
+cmake --preset default
+cmake --build --preset default --parallel
+ctest --preset default
 ```
 
-Set `BUILD_SHARED_LIBS=ON` for a shared library,
-`PIGGLE_BUILD_CLI=OFF` to omit the CLI, or `BUILD_TESTING=OFF` to omit tests.
+The default suite uses Google Test. The acceptance suite uses Ruby Cucumber
+and a native Cucumber-Cpp wire server:
+
+```sh
+bundle install
+cmake --preset acceptance
+cmake --build --preset acceptance --parallel
+ctest --preset acceptance
+```
+
+Use `release` for optimized unit and acceptance tests, `shared` for a shared
+library, or `no-tests` to omit all test infrastructure. The
+[testing guide](docs/testing.md) describes the suite switches, prerequisites,
+and ignored `CMakeUserPresets.json` customization. `PIGGLE_BUILD_CLI` controls
+the command-line tool; it defaults to off when included as a subdirectory.
 
 ## Documentation
 

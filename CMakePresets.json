@@ -1,0 +1,174 @@
+{
+	"version": 5,
+	"cmakeMinimumRequired": {
+		"major": 3,
+		"minor": 24,
+		"patch": 0
+	},
+	"configurePresets": [
+		{
+			"name": "base",
+			"hidden": true,
+			"binaryDir": "${sourceDir}/build/${presetName}",
+			"cacheVariables": {
+				"CMAKE_INSTALL_PREFIX": "$env{HOME}/.local",
+				"CPM_SOURCE_CACHE": "$env{HOME}/.cache/CPM",
+				"BUILD_TESTING": true,
+				"BUILD_UNIT_TESTS": true,
+				"BUILD_ACCEPTANCE_TESTS": false,
+				"CMAKE_BUILD_TYPE": "Debug"
+			}
+		},
+		{
+			"name": "default",
+			"displayName": "Unit tests",
+			"inherits": "base",
+			"binaryDir": "${sourceDir}/build"
+		},
+		{
+			"name": "acceptance",
+			"displayName": "Unit and acceptance tests",
+			"inherits": "base",
+			"cacheVariables": {
+				"BUILD_ACCEPTANCE_TESTS": true
+			}
+		},
+		{
+			"name": "acceptance-only",
+			"displayName": "Acceptance tests only",
+			"inherits": "acceptance",
+			"cacheVariables": {
+				"BUILD_UNIT_TESTS": false
+			}
+		},
+		{
+			"name": "no-suites",
+			"displayName": "Both test suites disabled",
+			"inherits": "base",
+			"cacheVariables": {
+				"BUILD_UNIT_TESTS": false
+			}
+		},
+		{
+			"name": "no-tests",
+			"displayName": "Test infrastructure disabled",
+			"inherits": "base",
+			"cacheVariables": {
+				"BUILD_TESTING": false
+			}
+		},
+		{
+			"name": "release",
+			"displayName": "Release unit and acceptance tests",
+			"inherits": "acceptance",
+			"cacheVariables": {
+				"CMAKE_BUILD_TYPE": "Release"
+			}
+		},
+		{
+			"name": "shared",
+			"displayName": "Shared library unit and acceptance tests",
+			"inherits": "acceptance",
+			"cacheVariables": {
+				"BUILD_SHARED_LIBS": true
+			}
+		}
+	],
+	"buildPresets": [
+		{
+			"name": "default",
+			"configurePreset": "default",
+			"configuration": "Debug"
+		},
+		{
+			"name": "acceptance",
+			"configurePreset": "acceptance",
+			"configuration": "Debug"
+		},
+		{
+			"name": "acceptance-only",
+			"configurePreset": "acceptance-only",
+			"configuration": "Debug"
+		},
+		{
+			"name": "no-suites",
+			"configurePreset": "no-suites",
+			"configuration": "Debug"
+		},
+		{
+			"name": "no-tests",
+			"configurePreset": "no-tests",
+			"configuration": "Debug"
+		},
+		{
+			"name": "release",
+			"configurePreset": "release",
+			"configuration": "Release"
+		},
+		{
+			"name": "shared",
+			"configurePreset": "shared",
+			"configuration": "Debug"
+		}
+	],
+	"testPresets": [
+		{
+			"name": "test-base",
+			"hidden": true,
+			"output": {
+				"outputOnFailure": true
+			},
+			"execution": {
+				"noTestsAction": "error"
+			}
+		},
+		{
+			"name": "default",
+			"inherits": "test-base",
+			"configurePreset": "default",
+			"configuration": "Debug"
+		},
+		{
+			"name": "acceptance",
+			"inherits": "test-base",
+			"configurePreset": "acceptance",
+			"configuration": "Debug"
+		},
+		{
+			"name": "acceptance-only",
+			"inherits": "test-base",
+			"configurePreset": "acceptance-only",
+			"configuration": "Debug"
+		},
+		{
+			"name": "no-suites",
+			"inherits": "test-base",
+			"configurePreset": "no-suites",
+			"execution": {
+				"noTestsAction": "ignore"
+			},
+			"configuration": "Debug"
+		},
+		{
+			"name": "no-tests",
+			"inherits": "test-base",
+			"configurePreset": "no-tests",
+			"execution": {
+				"noTestsAction": "ignore"
+			},
+			"configuration": "Debug"
+		},
+		{
+			"name": "release",
+			"inherits": "test-base",
+			"configurePreset": "release",
+			"configuration": "Release"
+		},
+		{
+			"name": "shared",
+			"inherits": "test-base",
+			"configurePreset": "shared",
+			"configuration": "Debug"
+		}
+	]
+}

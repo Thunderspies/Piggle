@@ -29,7 +29,7 @@ Feature: Caller-controlled streams and synchronous workflows
     Then all callbacks in the finite observation cut complete before return
     And no callback in that cut is delivered twice
 
-  @WORK-005
+  @WORK-005 @linux
   Scenario: A source delete reports irreversible partial progress
     Given a loose source directory contains many files
     When its explicit deletion unlinks one file and then encounters an I/O error

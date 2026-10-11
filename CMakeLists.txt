@@ -1,29 +1,16 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.24)
 project(piggle VERSION 0.1.0 LANGUAGES C CXX)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
-
-# C11 ABI implemented in C++11 over the shared runtime foundation.
-option(BUILD_SHARED_LIBS "Build Piggle as a shared library" OFF)
-include(cmake/runtime-foundation.cmake)
-
-# Apply these settings only to Piggle targets, after configuring zlib-ng.
-if(MSVC)
-	add_compile_definitions(_CRT_SECURE_NO_WARNINGS
-		_CRT_NONSTDC_NO_WARNINGS)
-	add_compile_options(/WX)
-	add_link_options(/WX)
-else()
-	add_compile_options(-Werror)
-	add_link_options(-Werror)
-	if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR MINGW)
-		add_link_options(LINKER:--fatal-warnings)
-	elseif(APPLE)
-		add_link_options(LINKER:-fatal_warnings)
-	endif()
-endif()
-
+find_package(Threads REQUIRED)
 include(CheckIPOSupported)
 check_ipo_supported(RESULT piggle_ipo_supported
 	OUTPUT piggle_ipo_error LANGUAGES C CXX)
@@ -31,56 +18,29 @@ if(NOT piggle_ipo_supported)
 	message(STATUS "Release IPO unavailable: ${piggle_ipo_error}")
 endif()
 
-if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR MINGW) AND NOT MSVC)
-	add_compile_options($<$<CONFIG:Release>:-ffunction-sections>
-		$<$<CONFIG:Release>:-fdata-sections>)
-	add_link_options($<$<CONFIG:Release>:LINKER:--gc-sections>)
-endif()
-add_library(piggle
-	src/api.cpp
-	src/archive_builder.cpp
-	src/change.cpp
-	src/entries.cpp
-	src/file.cpp
-	src/io.cpp
-	src/lease.cpp
-	src/managed.cpp
-	src/native_path.cpp
-	src/source.cpp
-	src/tree.cpp
-	src/types.cpp
-)
-if(piggle_ipo_supported)
-	set_property(TARGET piggle PROPERTY
-		INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-	if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND
-		NOT BUILD_SHARED_LIBS AND NOT MSVC)
-		list(GET CMAKE_CXX_COMPILE_OPTIONS_IPO 0 piggle_ipo_link_flag)
-		target_link_options(piggle INTERFACE
-			"$<$<CONFIG:Release>:${piggle_ipo_link_flag}>")
-	endif()
-endif()
-add_library(piggle::piggle ALIAS piggle)
-piggle_configure_runtime(piggle)
-target_include_directories(piggle PUBLIC
-	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-	$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-)
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
-	option(PIGGLE_BUILD_CLI "Build the piggle archive command" ON)
+	set(piggle_top_level ON)
 else()
-	option(PIGGLE_BUILD_CLI "Build the piggle archive command" OFF)
+	set(piggle_top_level OFF)
 endif()
+option(BUILD_SHARED_LIBS "Build Piggle as a shared library" OFF)
+option(PIGGLE_BUILD_CLI "Build the piggle archive command"
+	${piggle_top_level})
+option(BUILD_TESTING "Build Piggle tests" ${piggle_top_level})
+include(CTest)
+option(BUILD_UNIT_TESTS "Build GoogleTest unit tests" ON)
+option(BUILD_ACCEPTANCE_TESTS "Build Cucumber acceptance tests" OFF)
+
+if(BUILD_TESTING AND BUILD_ACCEPTANCE_TESTS)
+	include(cmake/AcceptancePrerequisites.cmake)
+endif()
+add_subdirectory(cmake/dependencies)
+include(cmake/runtime-foundation.cmake)
+add_subdirectory(src)
 if(PIGGLE_BUILD_CLI)
 	add_subdirectory(cli)
 endif()
-if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
-	option(BUILD_TESTING "Build Piggle contract and infrastructure tests" ON)
-else()
-	option(BUILD_TESTING "Build Piggle contract and infrastructure tests" OFF)
-endif()
-include(CTest)
-if(BUILD_TESTING)
+if(BUILD_TESTING AND (BUILD_UNIT_TESTS OR BUILD_ACCEPTANCE_TESTS))
 	add_subdirectory(tests)
 endif()
 

@@ -1,37 +1,38 @@
-# Shared build foundation for skeletons and later implementations.
-if(NOT COMMAND CPMAddPackage)
-	include("${CMAKE_CURRENT_LIST_DIR}/CPM.cmake")
-endif()
-
-# Keep zlib-ng static, including when Piggle itself is a shared library.
-set(piggle_zlib_ng_hash
-	f9c65aa9c852eb8255b636fd9f07ce1c406f061ec19a2e7d508b318ca0c907d1
-)
-set(piggle_zlib_ng_platform_options)
-if(MINGW AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
-	# GCC PR54412 can misalign wide-vector stack slots on Windows.
-	# Disabling AVX2 also disables its dependent AVX512 variants.
-	list(APPEND piggle_zlib_ng_platform_options "WITH_AVX2 OFF")
-endif()
-CPMAddPackage(
-	NAME zlib-ng
-	VERSION 2.3.3
-	URL https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.3.tar.gz
-	URL_HASH SHA256=${piggle_zlib_ng_hash}
-	OPTIONS
-		"BUILD_SHARED_LIBS OFF"
-		"CMAKE_POSITION_INDEPENDENT_CODE ON"
-		"ZLIB_COMPAT OFF"
-		"ZLIB_ALIASES OFF"
-		"BUILD_TESTING OFF"
-		${piggle_zlib_ng_platform_options}
-)
+# Apply diagnostics and optimization only to maintained targets.
+function(piggle_configure_target target)
+	if(MSVC)
+		target_compile_definitions(${target} PRIVATE
+			_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
+		target_compile_options(${target} PRIVATE /W4 /WX /Gd /utf-8)
+		target_link_options(${target} PRIVATE /WX)
+	else()
+		target_compile_options(${target} PRIVATE
+			-Wall -Wextra -Wpedantic -Werror)
+		target_link_options(${target} PRIVATE -Werror)
+		if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR MINGW)
+			target_link_options(${target} PRIVATE
+				LINKER:--fatal-warnings)
+			target_compile_options(${target} PRIVATE
+				$<$<CONFIG:Release>:-ffunction-sections>
+				$<$<CONFIG:Release>:-fdata-sections>)
+			target_link_options(${target} PRIVATE
+				$<$<CONFIG:Release>:LINKER:--gc-sections>)
+		elseif(APPLE)
+			target_link_options(${target} PRIVATE
+				LINKER:-fatal_warnings)
+		endif()
+	endif()
+	if(piggle_ipo_supported)
+		set_property(TARGET ${target} PROPERTY
+			INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	endif()
+endfunction()
 
 function(piggle_configure_runtime target)
 	find_package(Threads REQUIRED)
-	target_compile_features(${target} PUBLIC c_std_11 cxx_std_11)
+	target_compile_features(${target} PUBLIC c_std_11 cxx_std_17)
 	set_target_properties(${target} PROPERTIES
-		CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES
+		CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES
 		CXX_EXTENSIONS OFF)
 	if(NOT WIN32)
 		set_target_properties(${target} PROPERTIES
@@ -54,10 +55,5 @@ function(piggle_configure_runtime target)
 				"LINKER:--exclude-libs,ALL")
 		endif()
 	endif()
-	if(MSVC)
-		target_compile_options(${target} PRIVATE /W4 /Gd)
-	else()
-		target_compile_options(${target}
-			PRIVATE -Wall -Wextra -Wpedantic)
-	endif()
+	piggle_configure_target(${target})
 endfunction()

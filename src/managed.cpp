@@ -4,7 +4,7 @@
 int pg_tree_manages(pg_tree *tree, const char *name)
 {
 	for (pg_managed_scope *scope = tree->managed; scope;
-	     scope = scope->next)
+		scope = scope->next)
 		if (pg_name_in_scope(name, scope->prefix,
 			scope->depth == PG_DISCOVER_RECURSIVE))
 			return 1;
@@ -103,7 +103,7 @@ static pg_status pg_tree_unmanage_coordinated(
 	pg_managed_scope **at = &tree->managed;
 
 	while (*at && ((*at)->depth != depth ||
-	       strcmp((*at)->prefix ? (*at)->prefix : "",
+		strcmp((*at)->prefix ? (*at)->prefix : "",
 		canonical ? canonical : "")))
 		at = &(*at)->next;
 	free(canonical);
@@ -310,11 +310,12 @@ static int pg_hint_scope_intersects(pg_native_hint *hint, pg_tree_scope *scope)
 	if (scope->exact)
 		return (scope->reader_refs || scope->managed) &&
 			(!strcmp(scope->prefix, hint->name) ||
-			 (hint->subtree && pg_name_in_scope(scope->prefix,
+				(hint->subtree && pg_name_in_scope(
+					scope->prefix,
 				hint->name, 1)));
 	return pg_name_in_scope(hint->name, scope->prefix, !scope->shallow) ||
 		(hint->subtree && scope->prefix &&
-		 pg_name_in_scope(scope->prefix, hint->name, 1));
+			pg_name_in_scope(scope->prefix, hint->name, 1));
 }
 
 static pg_status pg_hint_refresh_descendants(pg_tree *tree,
@@ -322,9 +323,9 @@ static pg_status pg_hint_refresh_descendants(pg_tree *tree,
 {
 	pg_status status = PG_OK;
 	for (pg_tree_scope *s = tree->scopes; s;
-	     s = s->next) {
+		s = s->next) {
 		if (!s->prefix || !pg_hint_scope_intersects(h, s) ||
-		    !pg_name_in_scope(s->prefix, h->name, 1))
+			!pg_name_in_scope(s->prefix, h->name, 1))
 			continue;
 		status = s->exact ? pg_source_refresh_name(h->source,
 			s->prefix, 0, error) :
@@ -348,8 +349,9 @@ pg_status pg_tree_hints_reconcile(pg_tree *tree, pg_error *error)
 		int known = 0, recursive = 0;
 
 		if (tree->query_name && h->name &&
-		    strcmp(tree->query_name, h->name) &&
-		    !(h->subtree && pg_name_in_scope(tree->query_name, h->name,
+			strcmp(tree->query_name, h->name) &&
+			!(h->subtree && pg_name_in_scope(
+				tree->query_name, h->name,
 			1)))
 			continue;
 		h->processed = 1;
@@ -386,7 +388,7 @@ pg_status pg_tree_hints_reconcile(pg_tree *tree, pg_error *error)
 				changed = 1;
 			}
 			if (status == PG_OK && pg_tree_manages(tree, h->name) &&
-			    (!known || (h->subtree && !recursive)))
+				(!known || (h->subtree && !recursive)))
 				status = pg_tree_invalidate(tree, h->name,
 					NULL);
 		}

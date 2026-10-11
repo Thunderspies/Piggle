@@ -2,12 +2,25 @@ Contributions will be rejected unless they meet the following criteria.
 
 # Code Style
 
-Write library sources in C++11, with a C11-compatible public C header and
+Write library sources in C++17, with a C11-compatible public C header and
 a procedural C++ header. Use free functions, plain data structs, opaque
 handles, and explicit state machines. Do not introduce methods, inheritance,
 polymorphism, templates (including STL containers or smart pointers), or
-exception-based error handling. Keep callbacks as explicit function pointers
-with caller state, and report errors through the public status contract.
+exception-based error handling. Keep public callbacks as explicit function
+pointers with caller state, and report errors through the public status
+contract.
+
+Lambdas and closures, including generic lambdas, may be used in internal
+implementation code. Their compiler-generated closure types and call operators
+are exceptions to the method and template restrictions. This permission does
+not apply to public headers.
+
+Test tooling under `tests/` is compiled as C++17. Test code may use GoogleTest
+and Cucumber-Cpp conventions, including their classes, templates, containers,
+and exceptions. This exception does not apply to library code or public
+headers. The C11 consumer fixture is compiled as C to verify public header and
+ABI compatibility. The formatting rules below apply only to C and C++ code
+maintained here, including tests; upstream dependency code retains its style.
 
 Follow the [Linux kernel coding style][style] with these extra restrictions.
 
@@ -69,16 +82,59 @@ add it with `CPMAddPackage`. Dependencies may be patched only so that they can
 build with CMake and CPM. Use the `PATCHES` parameter in `CPMAddPackage` to
 apply patches. Do not patch a dependency to port it to a specific compiler,
 link with another library, fix errors, or add/remove/change features for
-instance.
+instance. Each dependency should be added as a CMake file in a subdir to
+`cmake/dependencies` along with any patches for that dependency.
 
-Introducing a new dependeny that cannot be included as a standard CPM package
+Introducing a new dependency that cannot be included as a standard CPM package
 requires project maintainer approval.
+
+# Build Configurations
+
+Use the shared presets in `CMakePresets.json` to configure, build, and test.
+When a supported build configuration needs to be added, removed, or altered,
+change its configure, build, and test presets instead of using direct CMake
+commands with custom options. Keep the documented preset commands current.
+
+For special local environment options or one-off tests, use the ignored
+`CMakeUserPresets.json`, inheriting from shared presets where appropriate.
+The [testing guide](docs/testing.md) describes local customization.
 
 # Testing
 
-All automated tests must pass. Changes to the API declared in public headers
-necessitates revision or additions to the tests. This project follows the
-Behavioral Driven Development process, so changes to the intended usage and
-behavior of this software should be reflected in the included feature files.
-Where applicable, this software should be tested for interoperability with its
-previous release.
+All infrastructure regressions and populated product suites must pass. An
+enabled product suite with no cases or selected scenarios is an error. Keep
+product cases separate from fixtures that test empty-suite failures.
+
+Before review, configure and build the default unit suite and the opt-in
+acceptance suite, then run CTest with both enabled:
+
+```sh
+bundle install
+cmake --preset acceptance
+cmake --build --preset acceptance
+ctest --preset acceptance -L infrastructure
+ctest --preset acceptance -L '^(unit|acceptance)$'
+```
+
+Also check `git diff --check` and the code style and dependency rules above.
+For build or runner changes, verify the `default`, `acceptance`,
+`acceptance-only`, `no-suites`, and `no-tests` presets, including failure
+propagation and cleanup.
+The [testing guide](docs/testing.md) describes prerequisites and commands.
+
+Unit tests under `tests/unit/` check public API contracts, boundary and error
+cases, and regressions. Changes to API contracts require corresponding
+coverage. This project follows Behavior Driven Development with Cucumber:
+new or clarified observable behavior and meaningful workflows need scenarios
+under `features/`, backed by native steps under `tests/acceptance/`. Where
+applicable, test interoperability with the previous release.
+
+Revise expectations when intended behavior changes. Refactors retain existing
+expectations, and bugs require implementation fixes. Remove tests only when
+behavior is intentionally retired or equivalent coverage replaces it; explain
+the reason and remove unused steps and fixtures. Keep scenarios isolated and
+focused on outcomes. Infrastructure fixtures under `tests/infrastructure/`
+verify runner behavior and must not be counted as product cases or scenarios.
+CI runs these regressions before product tests on each supported compiler
+configuration. Keep infrastructure fixture sources and features outside
+product discovery.
