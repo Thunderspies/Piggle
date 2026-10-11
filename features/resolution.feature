@@ -35,7 +35,7 @@ Feature: Ordered sources and visible file selection
     Then the selected contents are from record 2
     And no API cursor exposes record 1 as a losing copy
 
-  @RANK-006
+  @RANK-006 @posix
   Scenario: Loose collisions use original path bytes
     Given a case-sensitive loose source contains "Dir/A" and "dir/a"
     When I resolve "dir/a"

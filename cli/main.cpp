@@ -36,8 +36,8 @@ static int extract_options(int argc, char **argv, uint32_t *flags,
 			*flags = PG_OVERWRITE;
 		} else if (!strcmp(argv[i], "--file")) {
 			if (++i == argc || !argv[i][0] ||
-			    !strcmp(argv[i], "--file") ||
-			    !strcmp(argv[i], "--overwrite"))
+				!strcmp(argv[i], "--file") ||
+				!strcmp(argv[i], "--overwrite"))
 				return 0;
 			++*file_count;
 		} else {
@@ -57,7 +57,7 @@ static pg_status extract_file(pg_context *context, pg_source *source,
 	if (status != PG_CAPACITY)
 		return status;
 	if (strlen(directory) > SIZE_MAX - 2 ||
-	    required > SIZE_MAX - strlen(directory) - 2) {
+		required > SIZE_MAX - strlen(directory) - 2) {
 		memset(error, 0, sizeof(*error));
 		error->status = PG_LIMIT;
 		error->cause = PG_LIMIT;
@@ -110,7 +110,7 @@ static void report(const char *action, pg_status status,
 		const pg_error *error)
 {
 	if (error->status == status &&
-	    error->cause != status) {
+		error->cause != status) {
 		fprintf(stderr,
 			"piggle: %s: status %d (cause %d)\n",
 			action, (int)status, (int)error->cause);
@@ -217,17 +217,17 @@ static int run(int argc, char **argv)
 		(!strcmp(argv[1], "create") &&
 			(argc < 4 || ((argc - 4) % 2) != 0 ||
 			(strcmp(argv[2], "pigg2") &&
-			 strcmp(argv[2], "hogg10")))) ||
+				strcmp(argv[2], "hogg10")))) ||
 		(!strcmp(argv[1], "extract") &&
 			(argc < 4 || !extract_options(argc, argv,
 				&extract_flags, &extract_count))) ||
 		(!strcmp(argv[1], "replace") && argc != 5) ||
 		(!strcmp(argv[1], "verify") && argc != 3) ||
 		(strcmp(argv[1], "list") &&
-		 strcmp(argv[1], "create") &&
-		 strcmp(argv[1], "extract") &&
-		 strcmp(argv[1], "replace") &&
-		 strcmp(argv[1], "verify"))) {
+			strcmp(argv[1], "create") &&
+			strcmp(argv[1], "extract") &&
+			strcmp(argv[1], "replace") &&
+			strcmp(argv[1], "verify"))) {
 		usage(stderr);
 		return 2;
 	}

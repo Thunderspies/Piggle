@@ -67,14 +67,14 @@ static inline pg_status pg_wire_payload(FILE *out,
 	uint64_t remaining = entry->stored_size;
 
 	if (entry->stage_offset > INT64_MAX ||
-	    fseeko(builder->staging, (off_t)entry->stage_offset, SEEK_SET))
+		fseeko(builder->staging, (off_t)entry->stage_offset, SEEK_SET))
 		return PG_IO;
 	while (remaining) {
 		size_t amount = remaining < sizeof(bytes) ?
 			(size_t)remaining : sizeof(bytes);
 
 		if (fread(bytes, 1, amount, builder->staging) != amount ||
-		    pg_wire_write(out, bytes, amount) != PG_OK)
+			pg_wire_write(out, bytes, amount) != PG_OK)
 			return PG_IO;
 		remaining -= amount;
 	}
@@ -96,14 +96,14 @@ static inline pg_status pg_pigg_measure(pg_archive_builder *builder,
 		size_t name_size = strlen(pg_wire_name(entry)) + 1;
 
 		if (++count > UINT32_MAX || name_size > UINT32_MAX - 4 ||
-		    names > UINT32_MAX - 4 - name_size ||
-		    entry->logical_size > UINT32_MAX ||
-		    entry->stored_size > UINT32_MAX)
+			names > UINT32_MAX - 4 - name_size ||
+			entry->logical_size > UINT32_MAX ||
+			entry->stored_size > UINT32_MAX)
 			return PG_LIMIT;
 		names += 4 + name_size;
 		if (entry->cached_header_size) {
 			if (entry->cached_header_size > UINT32_MAX - 4 ||
-			    headers > UINT32_MAX - 4 -
+				headers > UINT32_MAX - 4 -
 				entry->cached_header_size)
 				return PG_LIMIT;
 			headers += 4 + entry->cached_header_size;
@@ -175,7 +175,7 @@ static inline pg_status pg_pigg_write(pg_archive_builder *builder, FILE *out)
 		uint32_t size = (uint32_t)strlen(name) + 1;
 
 		if (pg_wire_u32_write(out, size) != PG_OK ||
-		    pg_wire_write(out, name, size) != PG_OK)
+			pg_wire_write(out, name, size) != PG_OK)
 			return PG_IO;
 	}
 	memset(pool_header, 0, sizeof(pool_header));
@@ -189,7 +189,7 @@ static inline pg_status pg_pigg_write(pg_archive_builder *builder, FILE *out)
 			continue;
 		if (pg_wire_u32_write(out,
 			(uint32_t)entry->cached_header_size) != PG_OK ||
-		    pg_wire_write(out, entry->cached_header,
+			pg_wire_write(out, entry->cached_header,
 			entry->cached_header_size) != PG_OK)
 			return PG_IO;
 	}
@@ -216,15 +216,15 @@ static inline pg_status pg_hogg_measure(pg_archive_builder *builder,
 		size_t name_size = strlen(pg_wire_name(entry)) + 1;
 
 		if (++users >= UINT32_MAX || name_size > UINT32_MAX - 4 ||
-		    data_size > UINT32_MAX - 4 - name_size ||
-		    entry->stored_size > 0xfffffffeu ||
-		    entry->logical_size > UINT32_MAX)
+			data_size > UINT32_MAX - 4 - name_size ||
+			entry->stored_size > 0xfffffffeu ||
+			entry->logical_size > UINT32_MAX)
 			return PG_LIMIT;
 		data_size += 4 + name_size;
 		slots++;
 		if (entry->cached_header_size) {
 			if (entry->cached_header_size > UINT32_MAX - 4 ||
-			    data_size > UINT32_MAX - 4 -
+				data_size > UINT32_MAX - 4 -
 				entry->cached_header_size)
 				return PG_LIMIT;
 			data_size += 4 + entry->cached_header_size;
@@ -236,8 +236,8 @@ static inline pg_status pg_hogg_measure(pg_archive_builder *builder,
 	}
 	capacity = users + 1 < 16 ? 16 : users + 1;
 	if (slots > UINT32_MAX || capacity > UINT32_MAX / 48 ||
-	    4144 + 48 * capacity > INT64_MAX - payloads ||
-	    data_size > INT64_MAX - (4144 + 48 * capacity + payloads))
+		4144 + 48 * capacity > INT64_MAX - payloads ||
+		data_size > INT64_MAX - (4144 + 48 * capacity + payloads))
 		return PG_LIMIT;
 	*users_out = (uint32_t)users;
 	*capacity_out = (uint32_t)capacity;
@@ -261,7 +261,7 @@ static inline pg_status pg_hogg_element(FILE *out, pg_md5 *hash,
 
 	pg_wire_u32(length, size);
 	if (pg_hogg_emit(out, hash, length, sizeof(length)) != PG_OK ||
-	    pg_hogg_emit(out, hash, data, size) != PG_OK)
+		pg_hogg_emit(out, hash, data, size) != PG_OK)
 		return PG_IO;
 	return PG_OK;
 }
@@ -285,7 +285,7 @@ static inline pg_status pg_hogg_datalist(pg_archive_builder *builder,
 		if (pg_hogg_element(out, &hash, name, size) != PG_OK)
 			return PG_IO;
 		if (entry->cached_header_size &&
-		    pg_hogg_element(out, &hash, entry->cached_header,
+			pg_hogg_element(out, &hash, entry->cached_header,
 			(uint32_t)entry->cached_header_size) != PG_OK)
 			return PG_IO;
 	}
@@ -325,7 +325,7 @@ static inline pg_status pg_hogg_write(pg_archive_builder *builder, FILE *out)
 	pg_wire_u32(header + 16, users);
 	pg_wire_u16(header + 20, 3096);
 	if (pg_wire_write(out, header, sizeof(header)) != PG_OK ||
-	    pg_wire_zeros(out, 1024 + 3096) != PG_OK)
+		pg_wire_zeros(out, 1024 + 3096) != PG_OK)
 		return PG_IO;
 	offset = base;
 	for (entry = builder->entries; entry; entry = entry->next) {

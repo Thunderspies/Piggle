@@ -1,0 +1,16 @@
+set(CMAKE_CXX_STANDARD 17)
+if(NOT COMMAND CPMAddPackage)
+	include("${PROJECT_SOURCE_DIR}/cmake/CPM.cmake")
+endif()
+
+add_subdirectory(zlib-ng)
+
+if(BUILD_TESTING AND (BUILD_UNIT_TESTS OR BUILD_ACCEPTANCE_TESTS))
+	add_subdirectory(googletest)
+	if(BUILD_ACCEPTANCE_TESTS)
+		add_subdirectory(nlohmann-json)
+		add_subdirectory(asio)
+		add_subdirectory(tclap)
+		add_subdirectory(cucumber-cpp)
+	endif()
+endif()

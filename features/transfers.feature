@@ -41,9 +41,17 @@ Feature: Whole-file sequential transfer and publication
     Examples:
       | kind             |
       | directory        |
+
+    @posix
+    Examples:
+      | kind             |
       | symbolic link    |
-      | Windows junction |
       | special file     |
+
+    @windows
+    Examples:
+      | kind             |
+      | Windows junction |
 
   @IO-006
   Scenario: Closing staged content preserves the old destination
@@ -172,7 +180,7 @@ Feature: Whole-file sequential transfer and publication
     And copying to a logical profile recomputes the destination digest
     And opening with the wrong profile never accepts the alternate digest
 
-  @IO-027
+  @IO-027 @windows
   Scenario: Native identity retains Windows subsecond timestamps
     Given a reader has captured a file on Windows
     When its bytes change without changing size or whole-second mtime

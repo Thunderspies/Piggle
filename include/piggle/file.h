@@ -73,7 +73,8 @@ PG_API pg_status PG_CALL pg_file_read_all_alloc(pg_file *file,
  * Owns writer-open/write/finish/close. No retargeting or implicit refresh.
  */
 PG_API pg_status PG_CALL pg_file_write_all(pg_file *file,
-		const void *buffer, size_t size, const pg_entry_options *entry, pg_error *error);
+		const void *buffer, size_t size, const pg_entry_options *entry,
+		pg_error *error);
 
 /* Selected logical reader -> native writer -> validated finish. Preserve
  * mtime; flags=0 exclusive, OVERWRITE permits replacing regular files.

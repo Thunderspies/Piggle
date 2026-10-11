@@ -2,5 +2,6 @@
 
 These scenarios describe observable behavior from the
 [API contract](../docs/api.md). Each scenario has one stable ID. Executable
-coverage lives in the C contract tests described by
-[testing](../docs/testing.md).
+coverage runs through Ruby Cucumber and native Cucumber-Cpp steps in
+`tests/acceptance/`, alongside Google Test contract cases. See
+[testing](../docs/testing.md) for presets, feature selection, and platform tags.

@@ -51,3 +51,10 @@ Feature: Virtual names and explicit native sources
     When I explicitly open "Extra.PIGG" as a source
     Then I can find "data/a" through that source handle
     And the source is still not attached to the tree
+
+  @NAME-007 @windows
+  Scenario: Reuse a Windows archive opened through an equivalent path
+    Given "Extra.PIGG" exists but is not attached
+    When I open that archive through a dot-containing native path
+    Then its reported path matches the full native archive path
+    And I can find "data/a" through that source handle

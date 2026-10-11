@@ -12,7 +12,7 @@ file selects one physical copy. Readers have independent seekable positions.
 Writers stage complete replacements. An archive builder stages several entries
 and publishes one new archive. Callers schedule transfers by choosing each reader and writer chunk size.
 
-The C11 interface is implemented in procedural C++11. Headers use opaque
+The C11 interface is implemented in procedural C++17. Headers use opaque
 handles, plain structs, free functions and status values. C++ headers import
 the same `pg_*` functions into `piggle` and offer shorter type aliases; they
 add no classes, overloads, templates, ownership conversions or ABI. Include

@@ -336,13 +336,13 @@ static inline int pg_win_open(const char *path, int flags,
 	}
 	found = info.dwFileAttributes;
 	if ((flags & O_NOFOLLOW) &&
-	    (found & FILE_ATTRIBUTE_REPARSE_POINT)) {
+		(found & FILE_ATTRIBUTE_REPARSE_POINT)) {
 		CloseHandle(handle);
 		errno = ELOOP;
 		return -1;
 	}
 	if ((flags & O_DIRECTORY) &&
-	    !(found & FILE_ATTRIBUTE_DIRECTORY)) {
+		!(found & FILE_ATTRIBUTE_DIRECTORY)) {
 		CloseHandle(handle);
 		errno = ENOTDIR;
 		return -1;
@@ -515,7 +515,7 @@ static inline pg_win_dir *pg_win_fdopendir(int fd)
 
 	free(wide);
 	if (listing->search == INVALID_HANDLE_VALUE &&
-	    code != ERROR_FILE_NOT_FOUND) {
+		code != ERROR_FILE_NOT_FOUND) {
 		free(listing);
 		pg_win_errno(code);
 		return NULL;
@@ -533,7 +533,7 @@ static inline pg_win_dirent *pg_win_readdir(pg_win_dir *listing)
 		return NULL;
 	}
 	if (!listing->first &&
-	    !FindNextFileW(listing->search, &listing->found)) {
+		!FindNextFileW(listing->search, &listing->found)) {
 		DWORD code = GetLastError();
 
 		listing->ended = 1;
@@ -558,7 +558,7 @@ static inline int pg_win_closedir(pg_win_dir *listing)
 	int result = 0;
 
 	if (listing->search != INVALID_HANDLE_VALUE &&
-	    !FindClose(listing->search)) {
+		!FindClose(listing->search)) {
 		pg_win_errno(GetLastError());
 		result = -1;
 	}
@@ -602,7 +602,7 @@ static inline int pg_win_fsync(int fd)
 	HANDLE handle = (HANDLE)_get_osfhandle(fd);
 
 	if (GetFileInformationByHandle(handle, &info) &&
-	    (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+		(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
 		return 0;
 	return _commit(fd);
 }
