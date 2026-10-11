@@ -8,11 +8,11 @@
 #include <dirent.h>
 
 static pg_status pg_tree_watch_path(pg_tree *tree, pg_source *source,
-		const char *path, const char *relative, uint32_t mask,
-		int *native_code)
+	const char *path, const char *relative, uint32_t mask,
+	int *native_code)
 {
-	int wd = inotify_add_watch(tree->native_fd, path, mask | IN_ONLYDIR |
-		IN_DONT_FOLLOW);
+	int wd = inotify_add_watch(tree->native_fd, path,
+		mask | IN_ONLYDIR | IN_DONT_FOLLOW);
 
 	if (wd < 0) {
 		*native_code = errno;
@@ -45,18 +45,19 @@ static pg_status pg_tree_watch_path(pg_tree *tree, pg_source *source,
 	return PG_OK;
 }
 
-static pg_status pg_tree_watch_directories(pg_tree *tree, pg_source *source,
-		const char *path, const char *relative, uint32_t mask,
-		int *native_code)
+static pg_status pg_tree_watch_directories(pg_tree *tree,
+	pg_source *source, const char *path, const char *relative,
+	uint32_t mask, int *native_code)
 {
-	pg_status status = pg_tree_watch_path(tree, source, path, relative,
-		mask, native_code);
+	pg_status status = pg_tree_watch_path(
+		tree, source, path, relative, mask, native_code);
 	DIR *listing;
 	struct dirent *item;
 
 	if (status != PG_OK)
 		return status;
-	int scan = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+	int scan = open(
+		path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
 
 	if (scan < 0) {
 		*native_code = errno;
@@ -75,12 +76,15 @@ static pg_status pg_tree_watch_directories(pg_tree *tree, pg_source *source,
 		size_t length = strlen(path), prefix = strlen(relative);
 		size_t size = strlen(item->d_name);
 
-		if (!strcmp(item->d_name, ".") || !strcmp(item->d_name, ".."))
+		if (!strcmp(item->d_name, ".") ||
+			!strcmp(item->d_name, ".."))
 			continue;
-		if (item->d_type != DT_UNKNOWN && item->d_type != DT_DIR)
+		if (item->d_type != DT_UNKNOWN &&
+			item->d_type != DT_DIR)
 			continue;
-		if (fstatat(scan, item->d_name, &found, AT_SYMLINK_NOFOLLOW) ||
-		    !S_ISDIR(found.st_mode)) {
+		if (fstatat(scan, item->d_name, &found,
+				AT_SYMLINK_NOFOLLOW) ||
+			!S_ISDIR(found.st_mode)) {
 			errno = 0;
 			continue;
 		}
@@ -97,11 +101,12 @@ static pg_status pg_tree_watch_directories(pg_tree *tree, pg_source *source,
 			status = PG_NOMEM;
 			break;
 		}
-		snprintf(child, length + size + 2, "%s/%s", path, item->d_name);
+		snprintf(child, length + size + 2, "%s/%s", path,
+			item->d_name);
 		snprintf(name, prefix + size + 2, "%s%s%s", relative,
 			prefix ? "/" : "", item->d_name);
-		status = pg_tree_watch_directories(tree, source, child, name,
-			mask, native_code);
+		status = pg_tree_watch_directories(
+			tree, source, child, name, mask, native_code);
 		free(child);
 		free(name);
 		if (status != PG_OK)
@@ -117,7 +122,7 @@ static pg_status pg_tree_watch_directories(pg_tree *tree, pg_source *source,
 }
 
 static pg_status pg_tree_linux_event(pg_tree *tree,
-		const struct inotify_event *event, pg_error *error)
+	const struct inotify_event *event, pg_error *error)
 {
 	pg_status status;
 
@@ -142,7 +147,8 @@ static pg_status pg_tree_linux_event(pg_tree *tree,
 	}
 	if (watch) {
 		if (!*watch->relative &&
-		    (event->mask & (IN_MOVE_SELF | IN_DELETE_SELF))) {
+			(event->mask &
+				(IN_MOVE_SELF | IN_DELETE_SELF))) {
 			tree->native_repair = 1;
 			tree->loss_pending = 1;
 		}
@@ -154,31 +160,38 @@ static pg_status pg_tree_linux_event(pg_tree *tree,
 			if (!name)
 				return pg_result(PG_NOMEM, error);
 			snprintf(name, size, "%s%s%s", watch->relative,
-				*watch->relative ? "/" : "", event->name);
+				*watch->relative ? "/" : "",
+				event->name);
 			status = pg_tree_hint_add(tree, watch->source,
 				name, !!(event->mask & IN_ISDIR));
-			if (status == PG_OK && (event->mask & IN_ISDIR) &&
-			    (event->mask & (IN_CREATE | IN_MOVED_TO))) {
+			if (status == PG_OK &&
+				(event->mask & IN_ISDIR) &&
+				(event->mask &
+					(IN_CREATE | IN_MOVED_TO))) {
 				size_t path_size =
-					strlen(watch->source->native_path)
-					+ strlen(name) + 2;
+					strlen(watch->source
+							->native_path) +
+					strlen(name) + 2;
 				char *path = (char *)malloc(path_size);
 				int code = 0;
 
 				if (!path) {
 					free(name);
-					return pg_result(PG_NOMEM, error);
+					return pg_result(
+						PG_NOMEM, error);
 				}
 				snprintf(path, path_size, "%s/%s",
-					watch->source->native_path, name);
-				uint32_t mask = IN_ATTRIB | IN_CLOSE_WRITE |
-					IN_CREATE | IN_DELETE | IN_MODIFY |
+					watch->source->native_path,
+					name);
+				uint32_t mask = IN_ATTRIB |
+					IN_CLOSE_WRITE | IN_CREATE |
+					IN_DELETE | IN_MODIFY |
 					IN_MOVED_FROM | IN_MOVED_TO |
 					IN_MOVE_SELF | IN_DELETE_SELF;
 
 				status = pg_tree_watch_directories(tree,
-					watch->source,
-					path, name, mask, &code);
+					watch->source, path, name, mask,
+					&code);
 				free(path);
 				if (status == PG_IO && code == ENOENT)
 					status = PG_OK;
@@ -192,14 +205,16 @@ static pg_status pg_tree_linux_event(pg_tree *tree,
 			pg_source *source = tree->sources[i];
 
 			if (source->format == PG_LOOSE ||
-			    source->watch_wd != event->wd)
+				source->watch_wd != event->wd)
 				continue;
-			if (event->mask & (IN_MOVE_SELF | IN_DELETE_SELF |
-			    IN_IGNORED)) {
+			if (event->mask &
+				(IN_MOVE_SELF | IN_DELETE_SELF |
+					IN_IGNORED)) {
 				tree->native_repair = 1;
 				tree->loss_pending = 1;
 			}
-			status = pg_tree_hint_add(tree, source, NULL, 1);
+			status =
+				pg_tree_hint_add(tree, source, NULL, 1);
 			if (status != PG_OK)
 				return pg_result(status, error);
 		}
@@ -210,8 +225,8 @@ static pg_status pg_tree_linux_event(pg_tree *tree,
 #endif
 
 #ifdef _WIN32
-static pg_status pg_tree_windows_subtree(pg_source *source, const char *name,
-		int *subtree)
+static pg_status pg_tree_windows_subtree(
+	pg_source *source, const char *name, int *subtree)
 {
 	size_t root = strlen(source->native_path), size = strlen(name);
 	struct stat state;
@@ -223,7 +238,8 @@ static pg_status pg_tree_windows_subtree(pg_source *source, const char *name,
 
 	if (!path)
 		return PG_NOMEM;
-	snprintf(path, root + size + 2, "%s/%s", source->native_path, name);
+	snprintf(path, root + size + 2, "%s/%s", source->native_path,
+		name);
 	int found = !lstat(path, &state);
 
 	free(path);
@@ -236,10 +252,12 @@ static pg_status pg_tree_windows_subtree(pg_source *source, const char *name,
 
 	if (!canonical)
 		return PG_NOMEM;
-	if (pg_name_normalize(source->context, name, canonical, capacity,
-		&capacity, NULL) == PG_OK) {
-		for (pg_source_record *r = source->records; r; r = r->next) {
-			if (!strcmp(canonical, r->info.canonical_name)) {
+	if (pg_name_normalize(source->context, name, canonical,
+			capacity, &capacity, NULL) == PG_OK) {
+		for (pg_source_record *r = source->records; r;
+			r = r->next) {
+			if (!strcmp(canonical,
+					r->info.canonical_name)) {
 				*subtree = S_ISDIR(r->identity.st_mode);
 				break;
 			}
@@ -249,43 +267,50 @@ static pg_status pg_tree_windows_subtree(pg_source *source, const char *name,
 	return PG_OK;
 }
 
-static pg_status pg_tree_windows_hints(pg_tree *tree, pg_source *source,
-		DWORD bytes, pg_error *error)
+static pg_status pg_tree_windows_hints(
+	pg_tree *tree, pg_source *source, DWORD bytes, pg_error *error)
 {
 	pg_status status;
 
 	size_t offset = 0;
 
 	while (offset + offsetof(FILE_NOTIFY_INFORMATION, FileName) <
-	       bytes) {
+		bytes) {
 		FILE_NOTIFY_INFORMATION *notice =
-			(FILE_NOTIFY_INFORMATION *)(source->native_buffer +
+			(FILE_NOTIFY_INFORMATION
+					*)(source->native_buffer +
 				offset);
 		if (notice->FileNameLength > bytes - offset -
-		    offsetof(FILE_NOTIFY_INFORMATION, FileName)) {
+				offsetof(FILE_NOTIFY_INFORMATION,
+					FileName)) {
 			tree->loss_pending = tree->native_repair = 1;
 			break;
 		}
-		int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
-			notice->FileName,
-				notice->FileNameLength / sizeof(WCHAR),
-			NULL, 0, NULL, NULL);
-		char *name = size ? (char *)malloc((size_t)size + 1) : NULL;
+		int size = WideCharToMultiByte(CP_UTF8,
+			WC_ERR_INVALID_CHARS, notice->FileName,
+			notice->FileNameLength / sizeof(WCHAR), NULL, 0,
+			NULL, NULL);
+		char *name =
+			size ? (char *)malloc((size_t)size + 1) : NULL;
 
 		if (!name)
-			return pg_result(size ? PG_NOMEM : PG_IO, error);
+			return pg_result(
+				size ? PG_NOMEM : PG_IO, error);
 		WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
 			notice->FileName,
-				notice->FileNameLength / sizeof(WCHAR),
-			name, size, NULL, NULL);
+			notice->FileNameLength / sizeof(WCHAR), name,
+			size, NULL, NULL);
 		name[size] = 0;
 		int subtree = 1;
 
-		status = source->format == PG_LOOSE ?
-			pg_tree_windows_subtree(source, name, &subtree) : PG_OK;
+		status = source->format == PG_LOOSE
+			? pg_tree_windows_subtree(
+					source, name, &subtree)
+			: PG_OK;
 		if (status == PG_OK)
 			status = pg_tree_hint_add(tree, source,
-				source->format == PG_LOOSE ? name : NULL,
+				source->format == PG_LOOSE ? name
+								: NULL,
 				subtree);
 		free(name);
 		if (status != PG_OK)
@@ -293,9 +318,10 @@ static pg_status pg_tree_windows_hints(pg_tree *tree, pg_source *source,
 		if (!notice->NextEntryOffset)
 			break;
 		if (notice->NextEntryOffset <
-		    offsetof(FILE_NOTIFY_INFORMATION, FileName) +
-			notice->FileNameLength ||
-		    notice->NextEntryOffset > bytes - offset) {
+				offsetof(FILE_NOTIFY_INFORMATION,
+					FileName) +
+					notice->FileNameLength ||
+			notice->NextEntryOffset > bytes - offset) {
 			tree->loss_pending = tree->native_repair = 1;
 			break;
 		}
@@ -304,12 +330,11 @@ static pg_status pg_tree_windows_hints(pg_tree *tree, pg_source *source,
 	return PG_OK;
 }
 
-static pg_status pg_tree_windows_arm(pg_source *source,
-		int *native_code)
+static pg_status pg_tree_windows_arm(
+	pg_source *source, int *native_code)
 {
 	DWORD filter = FILE_NOTIFY_CHANGE_FILE_NAME |
-		FILE_NOTIFY_CHANGE_DIR_NAME |
-		FILE_NOTIFY_CHANGE_SIZE |
+		FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE |
 		FILE_NOTIFY_CHANGE_LAST_WRITE |
 		FILE_NOTIFY_CHANGE_ATTRIBUTES;
 
@@ -318,9 +343,10 @@ static pg_status pg_tree_windows_arm(pg_source *source,
 		sizeof(source->native_overlapped));
 	source->native_overlapped.hEvent = source->native_event;
 	if (!ReadDirectoryChangesW(source->native_watch,
-		source->native_buffer, sizeof(source->native_buffer),
-		source->format == PG_LOOSE, filter, NULL,
-		&source->native_overlapped, NULL)) {
+			source->native_buffer,
+			sizeof(source->native_buffer),
+			source->format == PG_LOOSE, filter, NULL,
+			&source->native_overlapped, NULL)) {
 		*native_code = (int)GetLastError();
 		return PG_IO;
 	}
@@ -329,8 +355,8 @@ static pg_status pg_tree_windows_arm(pg_source *source,
 }
 #endif
 
-pg_status pg_tree_native_add_source(pg_tree *tree, pg_source *source,
-		int *native_code)
+pg_status pg_tree_native_add_source(
+	pg_tree *tree, pg_source *source, int *native_code)
 {
 #ifdef __linux__
 	uint32_t mask = IN_ATTRIB | IN_CLOSE_WRITE | IN_CREATE |
@@ -339,7 +365,8 @@ pg_status pg_tree_native_add_source(pg_tree *tree, pg_source *source,
 	if (source->format == PG_LOOSE)
 		return pg_tree_watch_directories(tree, source,
 			source->native_path, "", mask, native_code);
-	int wd = inotify_add_watch(tree->native_fd, source->native_path, mask);
+	int wd = inotify_add_watch(
+		tree->native_fd, source->native_path, mask);
 
 	if (wd < 0) {
 		*native_code = errno;
@@ -355,8 +382,8 @@ pg_status pg_tree_native_add_source(pg_tree *tree, pg_source *source,
 	pg_status status;
 
 	if (source->format != PG_LOOSE) {
-		size_t length = separator ?
-			(size_t)(separator - path) : 0;
+		size_t length =
+			separator ? (size_t)(separator - path) : 0;
 
 		if (length == 2 && path[1] == ':')
 			length++;
@@ -370,10 +397,12 @@ pg_status pg_tree_native_add_source(pg_tree *tree, pg_source *source,
 		parent[length ? length : 1] = '\0';
 		path = parent;
 	}
-	source->native_watch = pg_win_create_file(path, FILE_LIST_DIRECTORY,
+	source->native_watch = pg_win_create_file(path,
+		FILE_LIST_DIRECTORY,
 		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-		NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS |
-		FILE_FLAG_OVERLAPPED, NULL);
+		NULL, OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+		NULL);
 	free(parent);
 	if (source->native_watch == INVALID_HANDLE_VALUE) {
 		*native_code = (int)GetLastError();
@@ -418,7 +447,7 @@ void pg_tree_native_remove_source(pg_tree *tree, pg_source *source)
 		free(watch);
 	}
 	if (source->format != PG_LOOSE && tree->native_fd >= 0 &&
-	    source->watch_wd >= 0)
+		source->watch_wd >= 0)
 		inotify_rm_watch(tree->native_fd, source->watch_wd);
 #elif defined(_WIN32)
 	(void)tree;
@@ -457,28 +486,29 @@ static int pg_change_same(const pg_file *before, const pg_file *after)
 }
 
 static pg_status pg_change_emit(pg_tree *tree,
-		const pg_observer *observer, pg_file *before,
-		pg_file *after)
+	const pg_observer *observer, pg_file *before, pg_file *after)
 {
 	pg_visible_change change = {};
 
 	if (tree->next_sequence == UINT64_MAX)
 		return PG_LIMIT;
 	change.sequence = tree->next_sequence++;
-	change.kind = before ? after ? PG_CHANGE_UPDATE :
-		PG_CHANGE_REMOVE : PG_CHANGE_ADD;
-	change.canonical_name = after ? after->info.canonical_name :
-		before->info.canonical_name;
+	change.kind = before
+		? after ? PG_CHANGE_UPDATE : PG_CHANGE_REMOVE
+		: PG_CHANGE_ADD;
+	change.canonical_name = after ? after->info.canonical_name
+					: before->info.canonical_name;
 	pg_entry_info entries[2] = {};
-	pg_file *files[2] = { before, after };
+	pg_file *files[2] = {before, after};
 
 	for (int i = 0; i < 2; i++) {
 		pg_file *file = files[i];
 
 		if (!file)
 			continue;
-		entries[i].kind = S_ISDIR(file->source_identity.st_mode) ?
-			PG_ENTRY_DIRECTORY : PG_ENTRY_FILE;
+		entries[i].kind = S_ISDIR(file->source_identity.st_mode)
+			? PG_ENTRY_DIRECTORY
+			: PG_ENTRY_FILE;
 		entries[i].attributes = file->attributes;
 		entries[i].source_id = file->info.source_id;
 		entries[i].canonical_name = file->info.canonical_name;
@@ -488,25 +518,27 @@ static pg_status pg_change_emit(pg_tree *tree,
 	}
 	change.before_entry = before ? &entries[0] : NULL;
 	change.after_entry = after ? &entries[1] : NULL;
-	change.before = before && entries[0].kind == PG_ENTRY_FILE ?
-		&before->info : NULL;
-	change.after = after && entries[1].kind == PG_ENTRY_FILE ?
-		&after->info : NULL;
+	change.before = before && entries[0].kind == PG_ENTRY_FILE
+		? &before->info
+		: NULL;
+	change.after = after && entries[1].kind == PG_ENTRY_FILE
+		? &after->info
+		: NULL;
 	if (observer->visible)
 		observer->visible(observer->user, &change);
 	return PG_OK;
 }
 
-static int pg_change_scope_covered(pg_tree *tree,
-		pg_tree_scope *scope)
+static int pg_change_scope_covered(pg_tree *tree, pg_tree_scope *scope)
 {
-	for (pg_tree_scope *other = tree->scopes; other; other = other->next) {
+	for (pg_tree_scope *other = tree->scopes; other;
+		other = other->next) {
 		if (other == scope || other->exact)
 			continue;
 		if (other->shallow && !scope->exact)
 			continue;
 		if (scope->exact && other->prefix &&
-		    !strcmp(scope->prefix, other->prefix))
+			!strcmp(scope->prefix, other->prefix))
 			continue;
 		if (!scope->prefix) {
 			if (!other->prefix && !other->shallow)
@@ -514,7 +546,7 @@ static int pg_change_scope_covered(pg_tree *tree,
 			continue;
 		}
 		if (pg_name_in_scope(scope->prefix, other->prefix,
-			!other->shallow))
+				!other->shallow))
 			return 1;
 	}
 	return 0;
@@ -557,19 +589,20 @@ pg_status pg_tree_queue_changes(pg_tree *tree, pg_error *error)
 		pg_tree_batch *batch;
 
 		if ((tree->partial_changes && !scope->dirty) ||
-		    (scope->exact && !scope->reader_refs && !scope->managed) ||
-		    pg_change_scope_covered(tree, scope))
+			(scope->exact && !scope->reader_refs &&
+				!scope->managed) ||
+			pg_change_scope_covered(tree, scope))
 			continue;
 		batch = (pg_tree_batch *)calloc(1, sizeof(*batch));
 		if (!batch) {
 			status = PG_NOMEM;
 			break;
 		}
-		status = pg_tree_scope_snapshot(tree, scope,
-			&batch->after, error);
+		status = pg_tree_scope_snapshot(
+			tree, scope, &batch->after, error);
 		if (status == PG_OK)
-			status = pg_tree_cursor_clone(batch->after,
-				&batch->replacement);
+			status = pg_tree_cursor_clone(
+				batch->after, &batch->replacement);
 		if (status != PG_OK) {
 			pg_cursor_close(&batch->after, NULL);
 			free(batch->invalid_name);
@@ -622,7 +655,7 @@ pg_status pg_tree_queue_changes(pg_tree *tree, pg_error *error)
 }
 
 static pg_status pg_change_deliver_batch(pg_tree *tree,
-		pg_tree_batch *batch, const pg_observer *observer)
+	pg_tree_batch *batch, const pg_observer *observer)
 {
 	if (batch->invalid_name || batch->invalid_scope) {
 		pg_visible_change change = {};
@@ -639,34 +672,37 @@ static pg_status pg_change_deliver_batch(pg_tree *tree,
 	}
 
 	while (batch->before_index < batch->before->count ||
-	       batch->after_index < batch->after->count) {
-		pg_file *before = batch->before_index <
-			batch->before->count ?
-			batch->before->files[batch->before_index] : NULL;
-		pg_file *after = batch->after_index <
-			batch->after->count ?
-			batch->after->files[batch->after_index] : NULL;
-		int compare = !before ? 1 : !after ? -1 :
-			strcmp(before->info.canonical_name,
-				after->info.canonical_name);
+		batch->after_index < batch->after->count) {
+		pg_file *before =
+			batch->before_index < batch->before->count
+			? batch->before->files[batch->before_index]
+			: NULL;
+		pg_file *after =
+			batch->after_index < batch->after->count
+			? batch->after->files[batch->after_index]
+			: NULL;
+		int compare = !before ? 1
+			: !after      ? -1
+					: strcmp(before->info.canonical_name,
+						after->info.canonical_name);
 		pg_status status = PG_OK;
 
 		if (compare < 0) {
-			status = pg_change_emit(tree, observer,
-				before, NULL);
+			status = pg_change_emit(
+				tree, observer, before, NULL);
 			if (status != PG_OK)
 				return status;
 			batch->before_index++;
 		} else if (compare > 0) {
-			status = pg_change_emit(tree, observer,
-				NULL, after);
+			status = pg_change_emit(
+				tree, observer, NULL, after);
 			if (status != PG_OK)
 				return status;
 			batch->after_index++;
 		} else {
 			if (!pg_change_same(before, after))
-				status = pg_change_emit(tree,
-					observer, before, after);
+				status = pg_change_emit(
+					tree, observer, before, after);
 			if (status != PG_OK)
 				return status;
 			batch->before_index++;
@@ -676,15 +712,14 @@ static pg_status pg_change_deliver_batch(pg_tree *tree,
 	return PG_OK;
 }
 
-static pg_status pg_tree_native_reconcile_roots(pg_tree *tree,
-		pg_root_binding **saved, pg_error *error)
+static pg_status pg_tree_native_reconcile_roots(
+	pg_tree *tree, pg_root_binding **saved, pg_error *error)
 {
 	pg_status status = PG_OK;
 
 	if (!tree->polling && !tree->reconciling)
 		pg_tree_reader_scope_sweep(tree);
-	if (tree->watch_mode != PG_WATCH_NATIVE ||
-	    tree->reconciling)
+	if (tree->watch_mode != PG_WATCH_NATIVE || tree->reconciling)
 		return pg_result(PG_OK, error);
 	for (size_t i = 0; i < tree->count; i++) {
 		pg_source *source = tree->sources[i];
@@ -692,7 +727,8 @@ static pg_status pg_tree_native_reconcile_roots(pg_tree *tree,
 
 		if (source->format != PG_LOOSE)
 			continue;
-		status = pg_source_rebind_root(source, &changed, saved, error);
+		status = pg_source_rebind_root(
+			source, &changed, saved, error);
 		if (status != PG_OK)
 			return status;
 		if (changed) {
@@ -722,24 +758,24 @@ static pg_status pg_tree_native_reconcile_roots(pg_tree *tree,
 			if (count < 0 && errno == EAGAIN)
 				break;
 			if (count < 0)
-				return pg_native_result(PG_IO, errno,
-					error);
+				return pg_native_result(
+					PG_IO, errno, error);
 			if (!count)
 				break;
 			available -= (int)count;
 			tree->native_dirty = 1;
 			while (at + sizeof(struct inotify_event) <=
-			       (size_t)count) {
-				struct inotify_event *event =
-					(struct inotify_event *)(
-						pending.bytes + at);
-				size_t length = sizeof(*event) +
-					event->len;
+				(size_t)count) {
+				struct inotify_event *event = (struct
+					inotify_event *)(pending.bytes +
+					at);
+				size_t length =
+					sizeof(*event) + event->len;
 
 				if (length > (size_t)count - at)
 					break;
-				status = pg_tree_linux_event(tree, event,
-					error);
+				status = pg_tree_linux_event(
+					tree, event, error);
 				if (status != PG_OK)
 					return status;
 				at += length;
@@ -754,23 +790,25 @@ static pg_status pg_tree_native_reconcile_roots(pg_tree *tree,
 		DWORD bytes = 0;
 		int native_code = 0;
 
-		if (source->format != PG_LOOSE && !tree->loss_reported &&
-		    (lstat(source->native_path, &path_state) ||
-		     path_state.st_dev != source->identity.st_dev ||
-		     path_state.st_ino != source->identity.st_ino)) {
+		if (source->format != PG_LOOSE &&
+			!tree->loss_reported &&
+			(lstat(source->native_path, &path_state) ||
+				path_state.st_dev !=
+					source->identity.st_dev ||
+				path_state.st_ino !=
+					source->identity.st_ino)) {
 			tree->loss_pending = 1;
 			tree->native_dirty = 1;
 			tree->native_repair = 1;
 		}
 
-		if (!source->native_watch ||
-		    !source->native_armed) {
+		if (!source->native_watch || !source->native_armed) {
 			if (source->native_watch) {
 				tree->loss_pending = 1;
 				tree->native_dirty = 1;
 				tree->native_repair = 1;
-				status = pg_tree_windows_arm(source,
-					&native_code);
+				status = pg_tree_windows_arm(
+					source, &native_code);
 				if (status != PG_OK)
 					return pg_native_result(status,
 						native_code, error);
@@ -783,22 +821,23 @@ static pg_status pg_tree_native_reconcile_roots(pg_tree *tree,
 		tree->native_dirty = 1;
 		source->native_armed = 0;
 		if (!GetOverlappedResult(source->native_watch,
-			&source->native_overlapped, &bytes, FALSE) ||
-		    !bytes) {
+				&source->native_overlapped, &bytes,
+				FALSE) ||
+			!bytes) {
 			tree->loss_pending = 1;
 			tree->native_repair = 1;
 		}
 		if (bytes && !tree->native_repair) {
-			status = pg_tree_windows_hints(tree, source, bytes,
-				error);
+			status = pg_tree_windows_hints(
+				tree, source, bytes, error);
 			if (status != PG_OK)
 				return status;
 		}
 		ResetEvent(source->native_event);
 		status = pg_tree_windows_arm(source, &native_code);
 		if (status != PG_OK)
-			return pg_native_result(status, native_code,
-				error);
+			return pg_native_result(
+				status, native_code, error);
 	}
 #endif
 	if (!tree->native_dirty && !tree->native_repair)
@@ -821,7 +860,7 @@ static pg_status pg_tree_native_reconcile_roots(pg_tree *tree,
 
 		pg_tree_scope_lock(tree);
 		for (pg_tree_scope *scope = tree->scopes; scope;
-		     scope = scope->next) {
+			scope = scope->next) {
 			if (!scope->exact || scope->reader_refs ||
 				scope->managed)
 				observed = 1;
@@ -829,23 +868,25 @@ static pg_status pg_tree_native_reconcile_roots(pg_tree *tree,
 		pg_tree_scope_unlock(tree);
 
 		for (size_t i = 0; i < tree->count; i++) {
-			if (!observed && tree->sources[i]->format == PG_LOOSE) {
+			if (!observed &&
+				tree->sources[i]->format == PG_LOOSE) {
 				deferred = 1;
 				continue;
 			}
 #ifdef _WIN32
-			pg_tree_native_remove_source(tree, tree->sources[i]);
+			pg_tree_native_remove_source(
+				tree, tree->sources[i]);
 #endif
 			if (tree->sources[i]->format == PG_LOOSE &&
-			    tree->sources[i]->fd < 0) {
+				tree->sources[i]->fd < 0) {
 				deferred = 1;
 				continue;
 			}
-			status = pg_tree_native_add_source(tree,
-				tree->sources[i], &native_code);
+			status = pg_tree_native_add_source(
+				tree, tree->sources[i], &native_code);
 			if (status != PG_OK) {
-				status = pg_native_result(status,
-					native_code, error);
+				status = pg_native_result(
+					status, native_code, error);
 				break;
 			}
 		}
@@ -861,7 +902,8 @@ static pg_status pg_tree_native_reconcile_roots(pg_tree *tree,
 pg_status pg_tree_native_reconcile(pg_tree *tree, pg_error *error)
 {
 	pg_root_binding *saved = NULL;
-	pg_status status = pg_tree_native_reconcile_roots(tree, &saved, error);
+	pg_status status =
+		pg_tree_native_reconcile_roots(tree, &saved, error);
 
 	pg_source_rebind_finish(saved, status == PG_OK);
 	return status;
@@ -870,216 +912,218 @@ pg_status pg_tree_native_reconcile(pg_tree *tree, pg_error *error)
 extern "C" {
 
 /* Enable one watch mode after refreshing requested baselines. */
-static pg_status PG_CALL pg_tree_watch_coordinated(pg_tree *tree, uint32_t mode,
-		pg_error *error)
-{
-	pg_tree_scope *scope;
-	pg_tree_scope *original_scopes = NULL;
-	pg_tree_batch *head = NULL, *tail = NULL;
-	pg_tree_source_state *saved = NULL;
-	pg_status status;
-	int native_code = 0;
-	int scopes_locked = 0;
-	int was_reconciling = 0;
-	size_t i;
-
-	if (!tree || mode < PG_WATCH_NATIVE || mode > PG_WATCH_SCAN)
-		return pg_result(PG_INVALID, error);
-	status = pg_tree_control_status(tree, 1);
-	if (status != PG_OK)
-		return pg_result(status, error);
-	if (tree->watch_mode && tree->watch_mode != mode)
-		return pg_result(PG_INVALID, error);
-	if (tree->watch_mode == mode)
-		return pg_result(PG_OK, error);
-	if (mode == PG_WATCH_NATIVE) {
-#ifdef __linux__
-		tree->native_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-		if (tree->native_fd < 0) {
-			native_code = errno;
-			return pg_native_result(PG_IO, native_code,
-				error);
-		}
-		for (i = 0; i < tree->count; i++) {
-			status = pg_tree_native_add_source(tree,
-				tree->sources[i], &native_code);
-			if (status != PG_OK)
-				goto watch_failed;
-		}
-#elif defined(_WIN32)
-		for (i = 0; i < tree->count; i++) {
-			status = pg_tree_native_add_source(tree,
-				tree->sources[i], &native_code);
-			if (status != PG_OK)
-				goto watch_failed;
-		}
-#else
-		return pg_result(PG_UNSUPPORTED, error);
-#endif
-	}
-	pg_tree_scope_lock(tree);
-	scopes_locked = 1;
-	original_scopes = tree->scopes;
-	was_reconciling = tree->reconciling;
-	status = pg_tree_sources_save(tree, &saved);
-	if (status != PG_OK)
-		goto watch_failed;
-	if (mode == PG_WATCH_SCAN) {
-		status = pg_tree_manage_scan(tree, error);
-		if (status != PG_OK) {
-			if (error)
-				native_code = error->native_code;
-			goto watch_failed;
-		}
-	}
-	tree->reconciling = 1;
-	status = pg_tree_rescan_scopes(tree, error);
-	if (status != PG_OK) {
-		if (error)
-			native_code = error->native_code;
-		goto watch_failed;
-	}
-	for (scope = tree->scopes; scope; scope = scope->next) {
-		if (scope->exact && !scope->reader_refs && !scope->managed)
-			continue;
-		pg_tree_batch *batch = (pg_tree_batch *)calloc(1,
-			sizeof(*batch));
-
-		if (!batch) {
-			status = PG_NOMEM;
-			goto watch_failed;
-		}
-		status = pg_tree_scope_snapshot(tree, scope, &batch->after,
-			error);
-		if (status != PG_OK) {
-			if (error)
-				native_code = error->native_code;
-			free(batch->invalid_name);
-			free(batch->invalid_scope);
-			free(batch);
-			goto watch_failed;
-		}
-		batch->scope = scope;
-		if (tail)
-			tail->next = batch;
-		else
-			head = batch;
-		tail = batch;
-	}
-	while (head) {
-		pg_tree_batch *next = head->next;
-
-		pg_cursor_close(&head->scope->baseline, NULL);
-		head->scope->baseline = head->after;
-		free(head);
-		head = next;
-	}
-	pg_tree_scope_unlock(tree);
-	scopes_locked = 0;
-	tree->reconciling = was_reconciling;
-	pg_tree_sources_discard(tree, saved);
-	tree->watch_mode = mode;
-	tree->loss_reported = 0;
-	tree->loss_pending = 0;
-	tree->native_dirty = 0;
-	tree->native_repair = 0;
-	return pg_result(PG_OK, error);
-
-watch_failed:
-	while (head) {
-		pg_tree_batch *next = head->next;
-
-		pg_cursor_close(&head->after, NULL);
-		free(head);
-		head = next;
-	}
-	if (scopes_locked) {
-		while (tree->scopes != original_scopes) {
-			pg_tree_scope *added = tree->scopes;
-
-			tree->scopes = added->next;
-			pg_cursor_close(&added->baseline, NULL);
-			free(added->prefix);
-			free(added);
-		}
-		if (saved)
-			pg_tree_sources_restore(tree, saved);
-		tree->reconciling = was_reconciling;
-		pg_tree_scope_unlock(tree);
-	}
-	pg_tree_sources_discard(tree, saved);
-	if (tree->native_fd >= 0) {
-		for (i = 0; i < tree->count; i++)
-			pg_tree_native_remove_source(tree,
-				tree->sources[i]);
-		close(tree->native_fd);
-		tree->native_fd = -1;
-	}
-#ifdef _WIN32
-	for (i = 0; i < tree->count; i++)
-		pg_tree_native_remove_source(tree, tree->sources[i]);
-#endif
-	return pg_native_result(status, native_code, error);
-}
-
-PG_API pg_status PG_CALL pg_tree_watch(pg_tree *tree, uint32_t mode,
-		pg_error *error)
+PG_API pg_status PG_CALL pg_tree_watch(
+	pg_tree *tree, uint32_t mode, pg_error *error)
 {
 	pg_context *context = tree ? tree->context : NULL;
 
 	pg_context_lock(context);
-	pg_status status = pg_tree_watch_coordinated(tree, mode, error);
+	auto coordinated = [&]() -> pg_status {
+		pg_tree_scope *scope;
+		pg_tree_scope *original_scopes = NULL;
+		pg_tree_batch *head = NULL, *tail = NULL;
+		pg_tree_source_state *saved = NULL;
+		pg_status status;
+		int native_code = 0;
+		int scopes_locked = 0;
+		int was_reconciling = 0;
+		size_t i;
+
+		if (!tree || mode < PG_WATCH_NATIVE ||
+			mode > PG_WATCH_SCAN)
+			return pg_result(PG_INVALID, error);
+		status = pg_tree_control_status(tree, 1);
+		if (status != PG_OK)
+			return pg_result(status, error);
+		if (tree->watch_mode && tree->watch_mode != mode)
+			return pg_result(PG_INVALID, error);
+		if (tree->watch_mode == mode)
+			return pg_result(PG_OK, error);
+		if (mode == PG_WATCH_NATIVE) {
+#ifdef __linux__
+			tree->native_fd =
+				inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+			if (tree->native_fd < 0) {
+				native_code = errno;
+				return pg_native_result(
+					PG_IO, native_code, error);
+			}
+			for (i = 0; i < tree->count; i++) {
+				status = pg_tree_native_add_source(tree,
+					tree->sources[i], &native_code);
+				if (status != PG_OK)
+					goto watch_failed;
+			}
+#elif defined(_WIN32)
+			for (i = 0; i < tree->count; i++) {
+				status = pg_tree_native_add_source(tree,
+					tree->sources[i], &native_code);
+				if (status != PG_OK)
+					goto watch_failed;
+			}
+#else
+			return pg_result(PG_UNSUPPORTED, error);
+#endif
+		}
+		pg_tree_scope_lock(tree);
+		scopes_locked = 1;
+		original_scopes = tree->scopes;
+		was_reconciling = tree->reconciling;
+		status = pg_tree_sources_save(tree, &saved);
+		if (status != PG_OK)
+			goto watch_failed;
+		if (mode == PG_WATCH_SCAN) {
+			status = pg_tree_manage_scan(tree, error);
+			if (status != PG_OK) {
+				if (error)
+					native_code =
+						error->native_code;
+				goto watch_failed;
+			}
+		}
+		tree->reconciling = 1;
+		status = pg_tree_rescan_scopes(tree, error);
+		if (status != PG_OK) {
+			if (error)
+				native_code = error->native_code;
+			goto watch_failed;
+		}
+		for (scope = tree->scopes; scope; scope = scope->next) {
+			if (scope->exact && !scope->reader_refs &&
+				!scope->managed)
+				continue;
+			pg_tree_batch *batch = (pg_tree_batch *)calloc(
+				1, sizeof(*batch));
+
+			if (!batch) {
+				status = PG_NOMEM;
+				goto watch_failed;
+			}
+			status = pg_tree_scope_snapshot(
+				tree, scope, &batch->after, error);
+			if (status != PG_OK) {
+				if (error)
+					native_code =
+						error->native_code;
+				free(batch->invalid_name);
+				free(batch->invalid_scope);
+				free(batch);
+				goto watch_failed;
+			}
+			batch->scope = scope;
+			if (tail)
+				tail->next = batch;
+			else
+				head = batch;
+			tail = batch;
+		}
+		while (head) {
+			pg_tree_batch *next = head->next;
+
+			pg_cursor_close(&head->scope->baseline, NULL);
+			head->scope->baseline = head->after;
+			free(head);
+			head = next;
+		}
+		pg_tree_scope_unlock(tree);
+		scopes_locked = 0;
+		tree->reconciling = was_reconciling;
+		pg_tree_sources_discard(tree, saved);
+		tree->watch_mode = mode;
+		tree->loss_reported = 0;
+		tree->loss_pending = 0;
+		tree->native_dirty = 0;
+		tree->native_repair = 0;
+		return pg_result(PG_OK, error);
+
+	watch_failed:
+		while (head) {
+			pg_tree_batch *next = head->next;
+
+			pg_cursor_close(&head->after, NULL);
+			free(head);
+			head = next;
+		}
+		if (scopes_locked) {
+			while (tree->scopes != original_scopes) {
+				pg_tree_scope *added = tree->scopes;
+
+				tree->scopes = added->next;
+				pg_cursor_close(&added->baseline, NULL);
+				free(added->prefix);
+				free(added);
+			}
+			if (saved)
+				pg_tree_sources_restore(tree, saved);
+			tree->reconciling = was_reconciling;
+			pg_tree_scope_unlock(tree);
+		}
+		pg_tree_sources_discard(tree, saved);
+		if (tree->native_fd >= 0) {
+			for (i = 0; i < tree->count; i++)
+				pg_tree_native_remove_source(
+					tree, tree->sources[i]);
+			close(tree->native_fd);
+			tree->native_fd = -1;
+		}
+#ifdef _WIN32
+		for (i = 0; i < tree->count; i++)
+			pg_tree_native_remove_source(
+				tree, tree->sources[i]);
+#endif
+		return pg_native_result(status, native_code, error);
+	};
+	pg_status status = coordinated();
 
 	pg_context_unlock(context);
 	return status;
 }
 
 /* Stop observation while retaining attachment and request state. */
-static pg_status PG_CALL pg_tree_unwatch_coordinated(
-		pg_tree *tree, pg_error *error)
-{
-	if (!tree)
-		return pg_result(PG_INVALID, error);
-	pg_status status = pg_tree_control_status(tree, 1);
-
-	if (status != PG_OK)
-		return pg_result(status, error);
-	if (tree->native_fd >= 0) {
-		for (size_t i = 0; i < tree->count; i++)
-			pg_tree_native_remove_source(tree,
-				tree->sources[i]);
-		close(tree->native_fd);
-		tree->native_fd = -1;
-	}
-#ifdef _WIN32
-	for (size_t i = 0; i < tree->count; i++)
-		pg_tree_native_remove_source(tree, tree->sources[i]);
-#endif
-	tree->watch_mode = PG_WATCH_OFF;
-	tree->loss_reported = 0;
-	tree->loss_pending = 0;
-	tree->native_dirty = 0;
-	tree->native_repair = 0;
-	pg_tree_hint_discard(tree, NULL);
-	pg_tree_pending_discard(tree);
-	pg_tree_reader_scope_sweep(tree);
-	return pg_result(PG_OK, error);
-}
-
 PG_API pg_status PG_CALL pg_tree_unwatch(pg_tree *tree, pg_error *error)
 {
 	pg_context *context = tree ? tree->context : NULL;
 
 	pg_context_lock(context);
-	pg_status status = pg_tree_unwatch_coordinated(tree, error);
+	auto coordinated = [&]() -> pg_status {
+		if (!tree)
+			return pg_result(PG_INVALID, error);
+		pg_status status = pg_tree_control_status(tree, 1);
+
+		if (status != PG_OK)
+			return pg_result(status, error);
+		if (tree->native_fd >= 0) {
+			for (size_t i = 0; i < tree->count; i++)
+				pg_tree_native_remove_source(
+					tree, tree->sources[i]);
+			close(tree->native_fd);
+			tree->native_fd = -1;
+		}
+#ifdef _WIN32
+		for (size_t i = 0; i < tree->count; i++)
+			pg_tree_native_remove_source(
+				tree, tree->sources[i]);
+#endif
+		tree->watch_mode = PG_WATCH_OFF;
+		tree->loss_reported = 0;
+		tree->loss_pending = 0;
+		tree->native_dirty = 0;
+		tree->native_repair = 0;
+		pg_tree_hint_discard(tree, NULL);
+		pg_tree_pending_discard(tree);
+		pg_tree_reader_scope_sweep(tree);
+		return pg_result(PG_OK, error);
+	};
+	pg_status status = coordinated();
 
 	pg_context_unlock(context);
 	return status;
 }
 
-/* Compare one finite set of requested scopes and deliver visible changes. */
-PG_API pg_status PG_CALL pg_tree_poll(pg_tree *tree,
-		const pg_observer *observer, pg_error *error)
+/* Compare one finite set of requested scopes and deliver visible
+ * changes. */
+PG_API pg_status PG_CALL pg_tree_poll(
+	pg_tree *tree, const pg_observer *observer, pg_error *error)
 {
 	pg_status status = PG_OK;
 	pg_tree_batch *delivery = NULL, *cut = NULL;
@@ -1153,8 +1197,8 @@ PG_API pg_status PG_CALL pg_tree_poll(pg_tree *tree,
 			tree->loss_reported = 1;
 			if (observer->visible) {
 				pg_context_unlock(tree->context);
-				observer->visible(observer->user,
-					&change);
+				observer->visible(
+					observer->user, &change);
 				pg_context_lock(tree->context);
 			}
 		}

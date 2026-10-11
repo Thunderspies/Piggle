@@ -34,7 +34,7 @@ Feature: Physical deletion and format-aware archive editing
     And the intended record is updated through HOGG mutation facilities
     And unrelated records and their metadata are preserved
 
-  @EDIT-005
+  @EDIT-005 @linux
   Scenario: HOGG failure after journal commitment requires recovery
     Given a HOGG replacement has a durably committed journal frame
     When applying that frame fails
@@ -71,7 +71,7 @@ Feature: Physical deletion and format-aware archive editing
     And the original archive is byte-for-byte unchanged
     And cleanup removes the unpublished clone
 
-  @EDIT-009
+  @EDIT-009 @linux
   Scenario: Failure after native replacement reports commitment honestly
     Given a validated clone has replaced its native archive path
     When a subsequent durability or cleanup operation fails

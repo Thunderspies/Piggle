@@ -63,7 +63,7 @@ Feature: Caller-polled visible changes in requested scopes
     Then the poll may report one transition to the latest stable state
     And it does not promise revision history
 
-  @CHANGE-009
+  @CHANGE-009 @linux
   Scenario: Notification loss invalidates watched scopes
     Given native watching is active for subtree "menu"
     When the native notification queue loses events

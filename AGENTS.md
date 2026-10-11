@@ -14,5 +14,13 @@ Required approvals must be obtained before taking the actions they govern.
 Commits that CONTRIBUTING.md treats as immutable must remain unchanged.
 Permission to defer requirements does not authorize documentation changes.
 
+Use the shared CMake presets for supported build configurations. Use the
+ignored `CMakeUserPresets.json` for special local options and one-off tests.
+Inherit from shared presets, give local configurations separate build
+directories, and do not commit user presets. Keep configure, build and test
+presets together; multi-configuration generators need matching configuration
+values in build and test presets. Keep temporary notes and tools outside
+tracked repository files.
+
 Before presenting changes for review, resolve all temporary deviations and
 complete the checks required by CONTRIBUTING.md.

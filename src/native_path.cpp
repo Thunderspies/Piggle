@@ -8,11 +8,11 @@ char *pg_native_absolute(const char *path, pg_status *status,
 
 	if (path[0] == '/'
 #ifdef _WIN32
-	    || (length >= 3 && path[1] == ':' &&
+		|| (length >= 3 && path[1] == ':' &&
 		(path[2] == '/' || path[2] == '\\')) ||
-	    (length >= 2 && path[0] == '\\' && path[1] == '\\')
+		(length >= 2 && path[0] == '\\' && path[1] == '\\')
 #endif
-	    ) {
+		) {
 		result = (char *)malloc(length + 1);
 		if (!result)
 			*status = PG_NOMEM;

@@ -36,7 +36,7 @@ static inline pg_status pg_read_span(int fd, uint64_t file_size,
 	uint8_t *bytes = (uint8_t *)out;
 
 	if (offset > file_size || size > file_size - offset ||
-	    offset > INT64_MAX || size > (uint64_t)INT64_MAX - offset)
+		offset > INT64_MAX || size > (uint64_t)INT64_MAX - offset)
 		return PG_CORRUPT;
 	while (size) {
 		size_t amount = size;
@@ -143,7 +143,7 @@ static inline pg_status pg_pigg_pool(pg_source *source, uint64_t offset,
 			const char *name = (const char *)values[i].data;
 
 			if (name[size - 1] != '\0' ||
-			    memchr(name, '\0', size - 1)) {
+				memchr(name, '\0', size - 1)) {
 				status = PG_CORRUPT;
 				goto fail;
 			}
@@ -190,8 +190,8 @@ static inline pg_status pg_pigg_index(pg_source *source)
 	if (status != PG_OK)
 		return status;
 	if (pg_read_u32(header) != 0x123 ||
-	    pg_read_u16(header + 4) != 2 ||
-	    pg_read_u16(header + 6) != 2)
+		pg_read_u16(header + 4) != 2 ||
+		pg_read_u16(header + 6) != 2)
 		return PG_UNSUPPORTED;
 	archive_stride = pg_read_u16(header + 8);
 	file_stride = pg_read_u16(header + 10);
@@ -238,18 +238,19 @@ static inline pg_status pg_pigg_index(pg_source *source)
 			pg_read_u32(record + 8);
 		payload_offset = pg_read_u32(record + 16);
 		if (pg_read_u32(record) != 0x3456 ||
-		    name_id >= names_count ||
-		    (header_id != UINT32_MAX && header_id >= headers_count) ||
-		    payload_offset < metadata_end ||
-		    payload_offset > file_size ||
-		    stored_size > file_size - payload_offset) {
+			name_id >= names_count ||
+			(header_id != UINT32_MAX &&
+				header_id >= headers_count) ||
+			payload_offset < metadata_end ||
+			payload_offset > file_size ||
+			stored_size > file_size - payload_offset) {
 			status = PG_CORRUPT;
 			goto cleanup;
 		}
 		original = (const char *)names[name_id].data;
 		name_size = names[name_id].size;
 		if (name_size < 2 || original[name_size - 2] == '/' ||
-		    original[name_size - 2] == '\\') {
+			original[name_size - 2] == '\\') {
 			status = PG_CORRUPT;
 			goto cleanup;
 		}
@@ -347,7 +348,7 @@ static inline pg_status pg_hogg_data(pg_source *source,
 	stored_size = pg_read_u32(file_record + 8);
 	payload_offset = pg_read_u64(file_record);
 	if (stored_size == UINT32_MAX ||
-	    (stored_size && (payload_offset < metadata_end ||
+		(stored_size && (payload_offset < metadata_end ||
 		payload_offset > file_size ||
 		stored_size > file_size - payload_offset)))
 		return PG_CORRUPT;
@@ -391,7 +392,7 @@ static inline pg_status pg_hogg_data(pg_source *source,
 			zng_inflateEnd(&stream);
 		}
 		if (result != Z_STREAM_END || stream.avail_in ||
-		    stream.avail_out) {
+			stream.avail_out) {
 			free(logical);
 			status = result == Z_MEM_ERROR ? PG_NOMEM :
 				PG_CORRUPT;
@@ -487,7 +488,7 @@ static inline pg_status pg_hogg_index(pg_source *source)
 	if (status != PG_OK)
 		return status;
 	if (pg_read_u32(header) != 0xdeadf00d ||
-	    pg_read_u16(header + 4) != 10)
+		pg_read_u16(header + 4) != 10)
 		return PG_UNSUPPORTED;
 	uint32_t op_size = pg_read_u16(header + 6);
 	uint32_t file_bytes = pg_read_u32(header + 8);
@@ -495,7 +496,7 @@ static inline pg_status pg_hogg_index(pg_source *source)
 	uint32_t dl_size = pg_read_u16(header + 20);
 
 	if (op_size < 8 || dl_size < 12 || file_bytes % 32 ||
-	    ea_bytes % 16)
+		ea_bytes % 16)
 		return PG_CORRUPT;
 	table_base = 24 + op_size + dl_size;
 	ea_base = table_base + file_bytes;
@@ -632,8 +633,8 @@ static inline pg_status pg_hogg_index(pg_source *source)
 			continue;
 		payload_offset = pg_read_u64(record);
 		if (stored_size && (payload_offset < metadata_end ||
-		    payload_offset > file_size ||
-		    stored_size > file_size - payload_offset)) {
+			payload_offset > file_size ||
+			stored_size > file_size - payload_offset)) {
 			status = PG_CORRUPT;
 			goto cleanup;
 		}
@@ -662,7 +663,7 @@ static inline pg_status pg_hogg_index(pg_source *source)
 		if (name_id == UINT32_MAX)
 			continue;
 		if (name_id >= data_count || !slots[name_id].size ||
-		    (header_id != UINT32_MAX &&
+			(header_id != UINT32_MAX &&
 			(header_id >= data_count || !slots[header_id].size))) {
 			status = PG_CORRUPT;
 			goto cleanup;
@@ -670,9 +671,9 @@ static inline pg_status pg_hogg_index(pg_source *source)
 		original = (const char *)slots[name_id].data;
 		name_size = slots[name_id].size;
 		if (name_size < 2 || original[name_size - 1] != '\0' ||
-		    memchr(original, '\0', name_size - 1) ||
-		    original[name_size - 2] == '/' ||
-		    original[name_size - 2] == '\\') {
+			memchr(original, '\0', name_size - 1) ||
+			original[name_size - 2] == '/' ||
+			original[name_size - 2] == '\\') {
 			status = PG_CORRUPT;
 			goto cleanup;
 		}
@@ -842,7 +843,7 @@ static inline pg_status pg_archive_verify_payload(int fd,
 
 	if (memcmp(info->digest, zero, digest_size) == 0) {
 		if (info->digest_kind == PG_DIGEST_MD5 &&
-		    !info->logical_size)
+			!info->logical_size)
 			return PG_OK;
 		return explicit_verify ? PG_NO_CHECKSUM : PG_OK;
 	}

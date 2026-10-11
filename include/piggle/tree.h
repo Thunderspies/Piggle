@@ -86,7 +86,7 @@ PG_API pg_status PG_CALL pg_tree_source(pg_tree *tree, size_t index,
  * Discard any prefix from other failures. Size>SIZE_MAX -> LIMIT.
  * No returned allocation or NUL terminator;
  * empty files still verified.
- * Name/buffer/bytes borrow through return. Close all private handles; retain the
+ * Name/buffer/bytes borrow through return. Close private handles; retain the
  * first error, report cleanup failure only if work succeeded. Serialize with
  * this output slot; workers and read-only observer callbacks allowed.
  */

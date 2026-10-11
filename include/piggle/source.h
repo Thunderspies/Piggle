@@ -44,7 +44,7 @@ PG_API pg_status PG_CALL pg_source_inspect(pg_source *source,
  * Discard any prefix from other failures. Size>SIZE_MAX -> LIMIT.
  * No returned allocation or NUL terminator;
  * empty files still verified.
- * Name/buffer/bytes borrow through return. Close all private handles; retain the
+ * Name/buffer/bytes borrow through return. Close private handles; retain the
  * first error, report cleanup failure only if work succeeded. Serialize with
  * this output slot; workers and read-only observer callbacks allowed.
  */
@@ -114,7 +114,8 @@ PG_API pg_status PG_CALL pg_source_copy(
  * Source control rules throughout; not permitted in observer callbacks.
  */
 PG_API pg_status PG_CALL pg_source_export(pg_source *source,
-		const char *name, const char *native_output, uint32_t flags, pg_error *error);
+		const char *name, const char *native_output, uint32_t flags,
+		pg_error *error);
 
 /* Refresh the loose root and capture visible source files, create private
  * builder, copy entries, finish once. No prior subtree request is needed.
