@@ -159,3 +159,43 @@ the same convention, creating ignored presets that inherit `acceptance` or
 `release` and choose GCC, Clang, or MSVC. Native Windows checks require a real
 Windows filesystem: Wine alone cannot establish recursive notification and
 native attribute guarantees.
+
+## Archive construction and maintenance checks
+
+The unit suite covers canonical collisions and insertion order, failed entry
+metadata allocation, reserve exhaustion and relocation, known mutation cache
+reconciliation and tree rollback, large cached headers, compressed DataLists,
+encoded input and interruption at all three DataList fold publication steps,
+unioned hidden/unnamed/shared ranges, compaction and aliases.
+Session checks cover exclusive ownership, checkpoint selection, suspend/close,
+metadata and payload corruption, cross-volume publication and process exit at
+checkpoint/publication boundaries. Linux syscall faults include ENOSPC and
+existing journal/cleanup failures. Both archive formats reject unwritable
+staging directories; pack reserves its captured inventory before transfer. A
+bounded child file-size limit checks retries after partial staging writes across
+volumes. A separate-volume case explicitly reports
+when the test machine has no second available filesystem.
+
+The `BUILD-001` through `BUILD-005` acceptance scenarios in
+`features/construction.feature` exercise reserve growth, a 64 KiB cached header
+with an unrelated reader, compaction, checkpoint-only resume and suspension.
+C11 and procedural C++ consumer fixtures cover each public addition.
+
+## Scaling benchmark
+
+```sh
+cmake --preset benchmark
+cmake --build --preset benchmark --parallel
+ctest --preset benchmark -L benchmark
+```
+
+The benchmark uses 10,000/50,000/100,000 named one-byte raw entries. It reports
+construction and finish time, canonical comparisons, allocation calls/bytes,
+process peak memory, payload copying, temporary archive length, growth events
+and relocated bytes. The mutation phase reports warmed replacement time,
+archive metadata read calls and allocations separately. GNU static builds count
+allocation and `pread64` calls with linker wrappers. Those counters are
+unavailable in other configurations; zero counter fields there mean unmeasured.
+The benchmark always checks builder comparison bounds and zero full
+reconciliations for known replacements. `reserve` as its third argument reserves
+the complete inventory and avoids table-overlap relocation.
