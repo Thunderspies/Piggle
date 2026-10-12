@@ -2450,14 +2450,18 @@ static pg_status pg_source_hogg_delete_locked(
 		source, frame, sizeof(frame), error);
 }
 
-static pg_status pg_source_hogg_compact(
-	pg_source *source, pg_error *error)
+static pg_status pg_source_hogg_fold(pg_source *source,
+	const pg_builder_entry *pending, int new_name, uint32_t *name_id,
+	uint32_t *header_id, pg_error *error)
 {
-	uint8_t header[24], disk[32], frame[56] = {};
+	uint8_t header[24], disk[32], frame[64] = {};
 	uint8_t *base = NULL, *journal = NULL, *packed = NULL;
 	pg_pool_value *slots = NULL;
 	uint64_t table, ea_base, journal_at, metadata_end, offset;
 	uint32_t files, eas, dl_file, count = 0, selected, i, at;
+	uint32_t extra;
+	uint32_t dl_ea;
+	uint8_t ea[16];
 	uint64_t packed_size = 8;
 	pg_md5 hash;
 	uint8_t digest[16];
@@ -2553,6 +2557,34 @@ static pg_status pg_source_hogg_compact(
 			goto done;
 		}
 	}
+	extra = (new_name ? 1 : 0) + (pending->cached_header_size ? 1 : 0);
+	if (count > INT32_MAX - extra ||
+		(uint64_t)(count + extra) > SIZE_MAX / sizeof(*slots)) {
+		status = PG_LIMIT;
+		goto done;
+	}
+	if (extra) {
+		pg_pool_value *grown = (pg_pool_value *)realloc(
+			slots, (size_t)(count + extra) * sizeof(*slots));
+
+		if (!grown) {
+			status = PG_NOMEM;
+			goto done;
+		}
+		slots = grown;
+		if (new_name) {
+			*name_id = count;
+			slots[count].data = (void *)pg_wire_name(pending);
+			slots[count++].size =
+				(uint32_t)strlen(pg_wire_name(pending)) + 1;
+		}
+		if (pending->cached_header_size) {
+			*header_id = count;
+			slots[count].data = pending->cached_header;
+			slots[count++].size =
+				(uint32_t)pending->cached_header_size;
+		}
+	}
 	for (i = 0; i < count; i++) {
 		packed_size += 4 + slots[i].size;
 		if (packed_size > UINT32_MAX) {
@@ -2594,15 +2626,26 @@ static pg_status pg_source_hogg_compact(
 	pg_md5_init(&hash);
 	pg_md5_update(&hash, packed, (size_t)packed_size);
 	pg_md5_finish(&hash, digest);
-	pg_wire_u32(frame, 3);
+	pg_wire_u32(frame, 2);
 	pg_wire_u32(frame + 8, dl_file);
 	pg_wire_u32(frame + 12, (uint32_t)packed_size);
 	memcpy(frame + 16, disk + 12, 4);
 	memcpy(frame + 24, disk + 24, 8);
 	memcpy(frame + 32, digest, 4);
 	pg_wire_u64(frame + 40, offset);
-	status = pg_source_hogg_commit(
-		source, frame, sizeof(frame), error);
+	if (pg_read_u16(disk + 24) != 0xfffe ||
+		(dl_ea = pg_read_u32(disk + 28)) >= eas) {
+		status = PG_CORRUPT;
+		goto done;
+	}
+	status = pg_read_span(source->fd, source->identity.st_size,
+		ea_base + 16 * (uint64_t)dl_ea, ea, sizeof(ea));
+	if (status != PG_OK)
+		goto done;
+	pg_wire_u32(frame + 48, 0);
+	memcpy(frame + 52, ea, 8);
+	memcpy(frame + 60, ea + 12, 4);
+	status = pg_source_hogg_commit(source, frame, sizeof(frame), error);
 	if (status != PG_OK)
 		goto done;
 	memset(frame, 0, 16);
@@ -2918,15 +2961,20 @@ static pg_status pg_source_hogg_stage(
 	if (entry->cached_header_size)
 		action_size += 9 + entry->cached_header_size;
 	if (action_size > pg_read_u16(header + 20) - 12 - selected) {
-		if (!selected ||
-			action_size >
-				(uint32_t)pg_read_u16(header + 20) -
-					12u)
-			return pg_result(PG_LIMIT, error);
-		status = pg_source_hogg_compact(source, error);
+		status = pg_source_hogg_fold(source, entry, record == NULL,
+			&name_id, &header_id, error);
 		if (status != PG_OK)
 			return status;
-		return pg_source_hogg_stage(writer, error);
+		current = source->identity;
+		selected = 0;
+		action_size = 0;
+		record = NULL;
+		for (pg_source_record *item = source->records; item;
+			item = item->next)
+			if (item->info.copy_id == writer->target_copy_id) {
+				record = item;
+				break;
+			}
 	}
 	if (!writer->metadata_only &&
 		fseeko(writer->builder->staging, 0, SEEK_SET))
@@ -2957,10 +3005,9 @@ static pg_status pg_source_hogg_stage(
 		return pg_native_result(PG_IO, errno, error);
 	uint32_t at = selected;
 
-	if (!record) {
-		const char *name = entry->original_name
-			? entry->original_name
-			: entry->canonical_name;
+	if (action_size && !record) {
+		const char *name = entry->original_name ? entry->original_name
+							: entry->canonical_name;
 		uint32_t size = (uint32_t)strlen(name) + 1;
 
 		action[0] = 1;
@@ -2974,7 +3021,7 @@ static pg_status pg_source_hogg_stage(
 				&native_code);
 		at += 9 + size;
 	}
-	if (status == PG_OK && entry->cached_header_size) {
+	if (status == PG_OK && action_size && entry->cached_header_size) {
 		action[0] = 1;
 		pg_wire_u32(action + 1, header_id);
 		pg_wire_u32(action + 5,
