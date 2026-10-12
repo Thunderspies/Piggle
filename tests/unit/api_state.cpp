@@ -238,9 +238,9 @@ static int builder_metadata(uint32_t format)
 	PG_CHECK(info.encoding == PG_ZLIB && info.stored_size > 0);
 	PG_CHECK(info.cached_header_size == 3);
 	PG_CHECK(memcmp(info.cached_header, "\1\0\2", 3) == 0);
-	PG_CHECK(info.digest_kind ==
-		(format == PG_PIGG2 ? PG_DIGEST_MD5
-					: PG_DIGEST_MD5_32));
+	uint32_t expected_digest =
+		format == PG_PIGG2 ? PG_DIGEST_MD5 : PG_DIGEST_MD5_32;
+	PG_CHECK(info.digest_kind == expected_digest);
 	size_t digest_size = format == PG_PIGG2 ? 16 : 4;
 
 	PG_CHECK(memcmp(info.digest, digest, digest_size) == 0);
