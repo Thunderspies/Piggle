@@ -815,29 +815,35 @@ static pg_status pg_tree_native_reconcile_roots(
 			}
 			continue;
 		}
-		if (WaitForSingleObject(source->native_event, 0) !=
-			WAIT_OBJECT_0)
-			continue;
-		tree->native_dirty = 1;
-		source->native_armed = 0;
-		if (!GetOverlappedResult(source->native_watch,
-				&source->native_overlapped, &bytes,
-				FALSE) ||
-			!bytes) {
-			tree->loss_pending = 1;
-			tree->native_repair = 1;
-		}
-		if (bytes && !tree->native_repair) {
-			status = pg_tree_windows_hints(
-				tree, source, bytes, error);
+		/* Rearming delivers notifications queued after the first
+		 * completion. Drain ready batches without waiting, and bound
+		 * the work so continuous edits cannot monopolize a poll. */
+		for (unsigned batch = 0; batch < 64; ++batch) {
+			if (WaitForSingleObject(source->native_event, 0) !=
+				WAIT_OBJECT_0)
+				break;
+			bytes = 0;
+			tree->native_dirty = 1;
+			source->native_armed = 0;
+			if (!GetOverlappedResult(source->native_watch,
+					&source->native_overlapped, &bytes,
+					FALSE) ||
+				!bytes) {
+				tree->loss_pending = 1;
+				tree->native_repair = 1;
+			}
+			if (bytes && !tree->native_repair) {
+				status = pg_tree_windows_hints(
+					tree, source, bytes, error);
+				if (status != PG_OK)
+					return status;
+			}
+			ResetEvent(source->native_event);
+			status = pg_tree_windows_arm(source, &native_code);
 			if (status != PG_OK)
-				return status;
+				return pg_native_result(
+					status, native_code, error);
 		}
-		ResetEvent(source->native_event);
-		status = pg_tree_windows_arm(source, &native_code);
-		if (status != PG_OK)
-			return pg_native_result(
-				status, native_code, error);
 	}
 #endif
 	if (!tree->native_dirty && !tree->native_repair)
