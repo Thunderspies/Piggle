@@ -603,7 +603,8 @@ THEN("^the next report includes its before and after metadata$")
 	ASSERT_EQ(w.reports(PG_CHANGE_UPDATE, "deep/a"), 1u);
 	auto event = std::find_if(w.events.begin(), w.events.end(),
 		[](const auto &entry) {
-			return entry.name == "deep/a";
+			return entry.kind == PG_CHANGE_UPDATE &&
+				entry.name == "deep/a";
 		});
 
 	ASSERT_NE(event, w.events.end());
