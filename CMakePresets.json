@@ -72,6 +72,16 @@
 			"cacheVariables": {
 				"BUILD_SHARED_LIBS": true
 			}
+		},
+		{
+			"name": "benchmark",
+			"displayName": "Archive scaling benchmarks",
+			"inherits": "base",
+			"cacheVariables": {
+				"BUILD_UNIT_TESTS": false,
+				"BUILD_BENCHMARKS": true,
+				"CMAKE_BUILD_TYPE": "Release"
+			}
 		}
 	],
 	"buildPresets": [
@@ -109,6 +119,11 @@
 			"name": "shared",
 			"configurePreset": "shared",
 			"configuration": "Debug"
+		},
+		{
+			"name": "benchmark",
+			"configurePreset": "benchmark",
+			"configuration": "Release"
 		}
 	],
 	"testPresets": [
@@ -169,6 +184,12 @@
 			"inherits": "test-base",
 			"configurePreset": "shared",
 			"configuration": "Debug"
+		},
+		{
+			"name": "benchmark",
+			"inherits": "test-base",
+			"configurePreset": "benchmark",
+			"configuration": "Release"
 		}
 	]
 }
