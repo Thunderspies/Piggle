@@ -1,4 +1,12 @@
 if(BUILD_UNIT_TESTS)
+	add_executable(session_probe session.cpp)
+	target_link_libraries(session_probe PRIVATE piggle::piggle)
+	piggle_configure_target(session_probe)
+	if(WIN32 AND BUILD_SHARED_LIBS)
+		add_custom_command(TARGET session_probe POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different
+				$<TARGET_FILE:piggle> $<TARGET_FILE_DIR:session_probe>)
+	endif()
 	add_executable(lease_probe lease.cpp)
 	target_link_libraries(lease_probe PRIVATE test_support)
 	piggle_configure_target(lease_probe)
@@ -17,6 +25,10 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	add_library(journal_fault SHARED journal_fault.cpp)
 	piggle_configure_target(journal_fault)
+endif()
+
+if(TARGET session_probe AND TARGET journal_fault)
+	target_link_libraries(session_probe PRIVATE journal_fault)
 endif()
 
 if(BUILD_UNIT_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)

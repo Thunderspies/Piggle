@@ -1841,6 +1841,45 @@ TEST_F(ApiRegressions, windows_write_through_dot_parents)
 	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
 }
 
+TEST_F(ApiRegressions, windows_resume_equivalent_session_paths)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *source = NULL;
+	pg_error error;
+	pg_archive_build_options options = {{PG_HOGG10, 0, 0}, NULL, 8};
+
+	ASSERT_EQ(pg_context_open(&context, &error), PG_OK);
+	ASSERT_TRUE(CreateDirectoryW(L"parent", NULL));
+	ASSERT_EQ(pg_archive_builder_create_session(context,
+		".\\parent/./output.hogg", ".\\parent/./session", &options,
+		&builder, &error), PG_OK) << error.native_code;
+	ASSERT_EQ(pg_archive_builder_write_all(builder, "data/a", "old", 3,
+		NULL, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_checkpoint(builder, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_suspend(&builder, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_resume(context, "parent\\session",
+		&builder, &error), PG_OK) << error.native_code;
+	ASSERT_EQ(pg_archive_builder_finish(builder, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_close(&builder, &error), PG_OK);
+	ASSERT_EQ(pg_source_open(context, "parent\\output.hogg", NULL,
+		&source, &error), PG_OK);
+	pg_source_info info;
+	std::string expected = std::filesystem::current_path().u8string() +
+		"\\parent\\output.hogg";
+
+	ASSERT_EQ(pg_source_inspect(source, &info, &error), PG_OK);
+	EXPECT_EQ(expected, info.native_path);
+	ASSERT_EQ(pg_source_validate(source, &error), PG_OK);
+	pg_buffer bytes = {};
+
+	ASSERT_EQ(pg_source_read_all_alloc(source, "data/a", 3,
+		&bytes, &error), PG_OK);
+	EXPECT_EQ(std::string((char *)bytes.data, bytes.size), "old");
+	pg_buffer_free(&bytes);
+	ASSERT_EQ(pg_source_close(&source, &error), PG_OK);
+	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
+}
 
 #endif
 
