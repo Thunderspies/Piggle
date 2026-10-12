@@ -298,6 +298,44 @@ regression('unit runner rejects empty cases and permits discovery') do |director
 	check(output.include?('RunnerFixture.ExecutesCase'), output)
 end
 
+regression('Bundler prerequisites use the selected Ruby') do |directory|
+	entry = File.join(directory, 'bundle')
+	File.write(entry, "abort 'Bundler entry launched directly'\n")
+	File.chmod(0o644, entry)
+	File.write(File.join(directory, 'CMakeLists.txt'), <<~CMAKE_FILE)
+		cmake_minimum_required(VERSION 3.24)
+		project(bundler_prerequisite_fixture LANGUAGES NONE)
+		set(PROJECT_SOURCE_DIR "#{ROOT}")
+		include("#{File.join(ROOT, 'cmake/AcceptancePrerequisites.cmake')}")
+	CMAKE_FILE
+	presets = {
+		'version' => 5,
+		'include' => [File.join(ROOT, 'CMakePresets.json')],
+		'configurePresets' => [{
+			'name' => 'bundler', 'inherits' => 'no-tests',
+			'generator' => GENERATOR,
+			'binaryDir' => '${sourceDir}/build',
+			'cacheVariables' => {
+				'RUBY_EXECUTABLE' => RbConfig.ruby,
+				'BUNDLER_EXECUTABLE' => entry
+			}
+		}],
+		'buildPresets' => [{
+			'name' => 'bundler', 'inherits' => 'no-tests',
+			'configurePreset' => 'bundler'
+		}],
+		'testPresets' => [{
+			'name' => 'bundler', 'inherits' => 'no-tests',
+			'configurePreset' => 'bundler'
+		}]
+	}
+	File.write(File.join(directory, 'CMakePresets.json'),
+		JSON.pretty_generate(presets))
+	status, output = run_command(directory,
+		[CMAKE, '--preset', 'bundler', '-S', directory])
+	check(status.success?, output)
+end
+
 regression('CTest distinguishes empty and populated unit discovery') do |directory|
 	# Exercise the project's discovery include in an isolated CMake fixture.
 	# No fixture cases are ever registered in the product build directories.
