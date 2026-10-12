@@ -732,14 +732,16 @@ pg_status pg_tree_cursor_clone(pg_cursor *source, pg_cursor **out)
 		file->native_path = from->native_path
 			? strdup(from->native_path)
 			: NULL;
-		if (from->info.cached_header_size) {
-			file->info.cached_header =
-				malloc(from->info.cached_header_size);
-			if (file->info.cached_header)
-				memcpy((void *)file->info.cached_header,
-					from->info.cached_header,
-					from->info.cached_header_size);
+		if (from->header_blob) {
+			file->header_blob = from->header_blob;
+			++file->header_blob->references;
+		} else if (from->info.cached_header_size) {
+			file->header_blob = pg_header_copy(
+				from->info.cached_header,
+				from->info.cached_header_size);
 		}
+		if (file->header_blob)
+			file->info.cached_header = file->header_blob + 1;
 		if (!file->info.canonical_name ||
 			!file->info.original_name ||
 			(from->native_path && !file->native_path) ||
@@ -747,7 +749,8 @@ pg_status pg_tree_cursor_clone(pg_cursor *source, pg_cursor **out)
 				!file->info.cached_header)) {
 			free((void *)file->info.canonical_name);
 			free((void *)file->info.original_name);
-			free((void *)file->info.cached_header);
+			pg_header_release(file->header_blob,
+				file->info.cached_header);
 			free(file->native_path);
 			free(file);
 			goto fail_clone;
@@ -761,7 +764,8 @@ pg_status pg_tree_cursor_clone(pg_cursor *source, pg_cursor **out)
 		if (status != PG_OK) {
 			free((void *)file->info.canonical_name);
 			free((void *)file->info.original_name);
-			free((void *)file->info.cached_header);
+			pg_header_release(file->header_blob,
+				file->info.cached_header);
 			free(file->native_path);
 			free(file);
 			goto fail_clone;
@@ -1353,11 +1357,7 @@ static void pg_tree_records_free(pg_source_record *record)
 	while (record) {
 		pg_source_record *next = record->next;
 
-		free((void *)record->info.canonical_name);
-		free((void *)record->info.original_name);
-		free((void *)record->info.cached_header);
-		free(record->native_path);
-		free(record);
+		pg_record_release(record);
 		record = next;
 	}
 }
@@ -1378,6 +1378,7 @@ static pg_source_record *pg_tree_records_clone(pg_source_record *source,
 		if (!copy)
 			goto clone_failed;
 		*copy = *source;
+		copy->header_blob = NULL;
 		copy->next = NULL;
 		copy->info.canonical_name =
 			strdup(source->info.canonical_name);
@@ -1387,15 +1388,16 @@ static pg_source_record *pg_tree_records_clone(pg_source_record *source,
 		copy->native_path = source->native_path
 			? strdup(source->native_path)
 			: NULL;
-		if (source->info.cached_header_size) {
-			copy->info.cached_header =
-				malloc(source->info.cached_header_size);
-			if (copy->info.cached_header)
-				memcpy((void *)copy->info.cached_header,
-					source->info.cached_header,
-					source->info
-						.cached_header_size);
+		if (source->header_blob) {
+			copy->header_blob = source->header_blob;
+			++copy->header_blob->references;
+		} else if (source->info.cached_header_size) {
+			copy->header_blob = pg_header_copy(
+				source->info.cached_header,
+				source->info.cached_header_size);
 		}
+		if (copy->header_blob)
+			copy->info.cached_header = copy->header_blob + 1;
 		*tail = copy;
 		tail = &copy->next;
 		if (!copy->info.canonical_name ||
@@ -1544,6 +1546,7 @@ void pg_tree_sources_restore(pg_tree *tree, pg_tree_source_state *saved)
 			continue;
 		pg_source_lock(source);
 		pg_source_index_clear(source);
+		pg_source_hogg_cache_clear(source);
 		pg_source_record **at = &source->records;
 
 		while (*at) {

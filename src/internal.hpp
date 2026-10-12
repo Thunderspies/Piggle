@@ -103,14 +103,60 @@ static inline void pg_context_child_drop(pg_context *context)
 	pg_atomic_decrement(&context->children);
 }
 
+/* Header snapshots share immutable bytes under the context lock. */
+struct pg_header_blob {
+	size_t references;
+};
+
+static inline pg_header_blob *pg_header_copy(const void *data, size_t size)
+{
+	if (size > SIZE_MAX - sizeof(pg_header_blob))
+		return NULL;
+	pg_header_blob *blob =
+		(pg_header_blob *)malloc(sizeof(*blob) + size);
+
+	if (blob) {
+		blob->references = 1;
+		memcpy(blob + 1, data, size);
+	}
+	return blob;
+}
+
+static inline void pg_header_release(pg_header_blob *blob, const void *data)
+{
+	if (blob) {
+		if (!--blob->references)
+			free(blob);
+	} else {
+		free((void *)data);
+	}
+}
+
 struct pg_source_record {
+	pg_header_blob *header_blob;
 	pg_source_record *next;
+	pg_source_record *previous;
 	uint32_t attributes;
 	pg_file_info info;
 	uint64_t payload_offset;
 	char *native_path;
 	struct stat identity;
 };
+
+/* Archive records own their metadata in the local-master representation. */
+static inline pg_source_record *pg_record_archive_new()
+{
+	return (pg_source_record *)calloc(1, sizeof(pg_source_record));
+}
+
+static inline void pg_record_release(pg_source_record *record)
+{
+	free((void *)record->info.canonical_name);
+	free((void *)record->info.original_name);
+	pg_header_release(record->header_blob, record->info.cached_header);
+	free(record->native_path);
+	free(record);
+}
 
 /* Order a name against the contiguous prefix/ descendant range. */
 static inline int pg_descendant_order(const char *name, const char *prefix)
@@ -163,9 +209,26 @@ struct pg_source_request {
 
 struct pg_source_sync;
 
+struct pg_builder_entry;
+struct pg_hogg_cache {
+	uint8_t header[24];
+	uint8_t *files;
+	uint8_t *eas;
+	pg_source_record **records;
+	uint32_t file_count;
+	uint32_t ea_count;
+	uint32_t data_file;
+	uint32_t data_count;
+	uint32_t free_file;
+	uint32_t free_ea;
+};
+
 struct pg_source {
 	pg_source_sync *sync;
 	int internal_mutation;
+	uint64_t full_reconciliations;
+	pg_hogg_cache *hogg_cache;
+	const pg_builder_entry *mutation_entry;
 	uint64_t changed_record;
 	pg_context *context;
 	pg_source *next_in_context;
@@ -173,6 +236,7 @@ struct pg_source {
 	pg_source_record *records;
 	pg_source_record **record_index;
 	size_t record_count;
+	size_t record_capacity;
 	pg_source_request *exact_requests;
 	pg_source_request *prefix_requests;
 	pg_source_request *shallow_requests;
@@ -201,12 +265,36 @@ struct pg_source {
 	struct pg_tree *attached;
 };
 
+static inline pg_source_record *pg_source_copy_record(pg_source *source,
+	uint64_t slot, pg_id copy_id)
+{
+	if (source->format == PG_HOGG10 && source->hogg_cache) {
+		pg_hogg_cache *cache = source->hogg_cache;
+		pg_source_record *record = slot < cache->file_count ?
+			cache->records[slot] : NULL;
+
+		return record && record->info.copy_id == copy_id
+			? record : NULL;
+	}
+	for (pg_source_record *record = source->records; record;
+		record = record->next)
+		if (record->info.copy_id == copy_id)
+			return record;
+	return NULL;
+}
+
 static inline void pg_source_index_clear(pg_source *source)
 {
 	free(source->record_index);
 	source->record_index = NULL;
 	source->record_count = 0;
+	source->record_capacity = 0;
 }
+
+void pg_source_hogg_cache_clear(pg_source *source);
+
+pg_status pg_source_record_find(pg_source *source, const char *name,
+	pg_source_record **out);
 
 pg_status pg_source_records_scope(pg_source *source, const char *prefix,
 		pg_source_record ***out, size_t *count);
@@ -326,6 +414,7 @@ pg_status pg_tree_control_status(const pg_tree *tree, int mutation);
 pg_status pg_source_control_status(const pg_source *source, int mutation);
 
 struct pg_file {
+	pg_header_blob *header_blob;
 	pg_source *source;
 	uint32_t attributes;
 	pg_tree *origin_tree;

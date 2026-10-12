@@ -65,10 +65,357 @@ static pg_status pg_source_index_get(
 			pg_source_record_order);
 		source->record_index = items;
 		source->record_count = size;
+		source->record_capacity = size ? size : 1;
 	}
 	*out = source->record_index;
 	*count = source->record_count;
 	return PG_OK;
+}
+
+void pg_source_hogg_cache_clear(pg_source *source)
+{
+	pg_hogg_cache *cache = source->hogg_cache;
+
+	if (!cache)
+		return;
+	free(cache->files);
+	free(cache->eas);
+	free(cache->records);
+	free(cache);
+	source->hogg_cache = NULL;
+}
+
+static pg_status pg_hogg_cache_ensure(pg_source *source)
+{
+	if (source->hogg_cache)
+		return PG_OK;
+	pg_hogg_cache *cache = (pg_hogg_cache *)calloc(1, sizeof(*cache));
+
+	if (!cache)
+		return PG_NOMEM;
+	pg_status status = pg_read_span(source->fd, source->identity.st_size, 0,
+		cache->header, sizeof(cache->header));
+	uint8_t *data = NULL;
+	pg_pool_value *slots = NULL;
+	uint8_t journal[12], actions[65536];
+	uint32_t selected = 0;
+	uint64_t table = 0, ea_base = 0;
+
+	if (status != PG_OK)
+		goto done_cache;
+	cache->file_count = pg_read_u32(cache->header + 8) / 32;
+	cache->ea_count = pg_read_u32(cache->header + 12) / 16;
+	cache->data_file = pg_read_u32(cache->header + 16);
+	table = 24 + pg_read_u16(cache->header + 6) +
+		pg_read_u16(cache->header + 20);
+	ea_base = table + 32 * (uint64_t)cache->file_count;
+	cache->files = (uint8_t *)malloc((size_t)cache->file_count * 32);
+	cache->eas = (uint8_t *)malloc((size_t)cache->ea_count * 16);
+	cache->records = (pg_source_record **)calloc(
+		cache->file_count, sizeof(*cache->records));
+	if (!cache->files || !cache->eas || !cache->records) {
+		status = PG_NOMEM;
+		goto done_cache;
+	}
+	status = pg_read_span(source->fd, source->identity.st_size, table,
+		cache->files, (size_t)cache->file_count * 32);
+	if (status == PG_OK)
+		status = pg_read_span(source->fd, source->identity.st_size,
+			ea_base, cache->eas, (size_t)cache->ea_count * 16);
+	if (status == PG_OK)
+		status = pg_hogg_data(source, table, ea_base,
+			ea_base + 16 * (uint64_t)cache->ea_count,
+			cache->file_count, cache->ea_count, cache->data_file,
+			&data, &slots, &cache->data_count);
+	if (status != PG_OK)
+		goto done_cache;
+	status = pg_read_span(source->fd, source->identity.st_size,
+		24 + pg_read_u16(cache->header + 6), journal, sizeof(journal));
+	if (status != PG_OK)
+		goto done_cache;
+	selected = pg_read_u32(journal) ? pg_read_u32(journal + 8)
+					: pg_read_u32(journal + 4);
+	if (selected > pg_read_u16(cache->header + 20) - 12u) {
+		status = PG_CORRUPT;
+		goto done_cache;
+	}
+	status = pg_read_span(source->fd, source->identity.st_size,
+		36 + pg_read_u16(cache->header + 6), actions, selected);
+	if (status != PG_OK)
+		goto done_cache;
+	for (uint32_t at = 0; at < selected;) {
+		uint8_t opcode = actions[at++];
+
+		if (selected - at < 4) {
+			status = PG_CORRUPT;
+			goto done_cache;
+		}
+		uint32_t id = pg_read_u32(actions + at);
+		at += 4;
+		if (id > INT32_MAX) {
+			status = PG_CORRUPT;
+			goto done_cache;
+		}
+		if (id >= cache->data_count)
+			cache->data_count = id + 1;
+		if (opcode == 2)
+			continue;
+		if (opcode != 1 || selected - at < 4) {
+			status = PG_CORRUPT;
+			goto done_cache;
+		}
+		uint32_t size = pg_read_u32(actions + at);
+		at += 4;
+		if (!size || size > selected - at) {
+			status = PG_CORRUPT;
+			goto done_cache;
+		}
+		at += size;
+	}
+	{
+		pg_source_record *previous = NULL;
+
+		for (pg_source_record *record = source->records; record;
+			record = record->next) {
+			record->previous = previous;
+			previous = record;
+			cache->records[record->info.archive_record] =
+				record;
+		}
+		pg_source_record **items;
+		size_t count;
+
+		status = pg_source_index_get(source, &items, &count);
+	}
+done_cache:
+	free(data);
+	free(slots);
+	source->hogg_cache = cache;
+	if (status != PG_OK)
+		pg_source_hogg_cache_clear(source);
+	return status;
+}
+
+/* All metadata needed to expose a known mutation is prepared before its
+ * operation journal becomes committed. No allocation follows successful redo.
+ */
+static pg_status pg_hogg_record_prepare(
+	pg_source *source, const uint8_t *frame, pg_source_record **out)
+{
+	*out = NULL;
+	uint32_t action = pg_read_u32(frame);
+	uint32_t slot = pg_read_u32(frame + 8);
+	pg_hogg_cache *cache = source->hogg_cache;
+
+	if ((action != 2 && action != 3) || slot == cache->data_file)
+		return PG_OK;
+	if (slot >= cache->file_count || source->generation == UINT64_MAX)
+		return PG_LIMIT;
+	pg_source_record *old = cache->records[slot];
+	const pg_builder_entry *entry = source->mutation_entry;
+
+	if ((!entry && !old) ||
+		(old && old->info.copy_generation == UINT64_MAX) ||
+		(!old && !source->context->next_id))
+		return PG_LIMIT;
+	pg_source_record *record = pg_record_archive_new();
+
+	if (!record)
+		return PG_NOMEM;
+	if (old) {
+		record->info = old->info;
+		record->payload_offset = old->payload_offset;
+	}
+	const char *name =
+		entry ? entry->canonical_name : old->info.canonical_name;
+	const char *original =
+		entry ? pg_wire_name(entry) : old->info.original_name;
+	const void *header =
+		entry ? entry->cached_header : old->info.cached_header;
+	size_t size = entry ? entry->cached_header_size
+			: old->info.cached_header_size;
+
+	record->info.canonical_name = strdup(name);
+	record->info.original_name = strdup(original);
+	record->info.cached_header = NULL;
+	if (size) {
+		if (old && old->header_blob &&
+			header == old->info.cached_header &&
+			size == old->info.cached_header_size) {
+			record->header_blob = old->header_blob;
+			++record->header_blob->references;
+		} else {
+			record->header_blob = pg_header_copy(header, size);
+		}
+		if (record->header_blob)
+			record->info.cached_header = record->header_blob + 1;
+	}
+	if (!record->info.canonical_name || !record->info.original_name ||
+		(size && !record->info.cached_header)) {
+		pg_record_release(record);
+		return PG_NOMEM;
+	}
+	record->info.cached_header_size = size;
+	record->info.source_id = source->id;
+	record->info.source_generation = source->generation + 1;
+	record->info.copy_id =
+		old ? old->info.copy_id : source->context->next_id;
+	record->info.copy_generation = old ? old->info.copy_generation + 1 : 1;
+	record->info.mtime = (int32_t)pg_read_u32(frame + 16);
+	record->info.archive_record = slot;
+	record->info.stored_size = pg_read_u32(frame + 12);
+	record->payload_offset = pg_read_u64(frame + 40);
+	record->info.digest_kind = PG_DIGEST_MD5_32;
+	record->info.checksum_domain = source->checksum_domain;
+	memcpy(record->info.digest, frame + 32, 4);
+	if (entry) {
+		record->info.logical_size = entry->logical_size;
+		record->info.encoding = entry->encoding;
+	}
+	if (!old && source->record_count == source->record_capacity) {
+		size_t capacity = source->record_capacity < 16
+			? 16
+			: source->record_capacity * 2;
+
+		if (capacity < source->record_capacity ||
+			capacity > SIZE_MAX / sizeof(*source->record_index)) {
+			pg_record_release(record);
+			return PG_LIMIT;
+		}
+		pg_source_record **grown = (pg_source_record **)realloc(
+			source->record_index, capacity * sizeof(*grown));
+
+		if (!grown) {
+			pg_record_release(record);
+			return PG_NOMEM;
+		}
+		source->record_index = grown;
+		source->record_capacity = capacity;
+	}
+	*out = record;
+	return PG_OK;
+}
+
+static void pg_hogg_record_publish(
+	pg_source *source, const uint8_t *frame, pg_source_record *prepared)
+{
+	pg_hogg_cache *cache = source->hogg_cache;
+	uint32_t action = pg_read_u32(frame);
+	uint32_t slot =
+		action == 1 ? pg_read_u32(frame + 4) : pg_read_u32(frame + 8);
+	pg_source_record *old =
+		slot < cache->file_count ? cache->records[slot] : NULL;
+
+	if (action == 4) {
+		pg_wire_u64(cache->files + 32 * (size_t)slot,
+			pg_read_u64(frame + 24));
+		if (old)
+			old->payload_offset = pg_read_u64(frame + 24);
+		return;
+	}
+	if (action == 1 || action == 2 || action == 3) {
+		uint8_t *disk = cache->files + 32 * (size_t)slot;
+
+		if (action == 1) {
+			pg_wire_u32(disk + 8, UINT32_MAX);
+			uint32_t ea = pg_read_u32(frame + 8);
+
+			if (ea != UINT32_MAX) {
+				pg_wire_u32(
+					cache->eas + 16 * (size_t)ea + 12, 1);
+				if (cache->free_ea > ea)
+					cache->free_ea = ea;
+			}
+			if (cache->free_file > slot)
+				cache->free_file = slot;
+		} else {
+			pg_wire_u64(disk, pg_read_u64(frame + 40));
+			memcpy(disk + 8, frame + 12, 8);
+			memcpy(disk + 16, frame + 32, 4);
+			memcpy(disk + 24, frame + 24, 8);
+			if (action == 2) {
+				uint32_t ea = pg_read_u32(frame + 28);
+				uint8_t *ea_disk = cache->eas + 16 * (size_t)ea;
+
+				memcpy(ea_disk, frame + 52, 8);
+				memcpy(ea_disk + 8, frame + 48, 4);
+				pg_wire_u32(ea_disk + 12, 0);
+				for (unsigned at = 52; at <= 56; at += 4) {
+					uint32_t id = pg_read_u32(frame + at);
+
+					if (id != UINT32_MAX &&
+						id >= cache->data_count)
+						cache->data_count = id + 1;
+				}
+			}
+		}
+	}
+	if (!prepared && action != 1)
+		return;
+	if (old) {
+		size_t low = 0, high = source->record_count;
+
+		while (low < high) {
+			size_t middle = low + (high - low) / 2;
+			int order = pg_source_record_order(
+				&source->record_index[middle], &old);
+
+			if (order < 0)
+				low = middle + 1;
+			else
+				high = middle;
+		}
+		if (prepared) {
+			free((void *)old->info.canonical_name);
+			free((void *)old->info.original_name);
+			pg_header_release(old->header_blob,
+				old->info.cached_header);
+			old->header_blob = prepared->header_blob;
+			old->info = prepared->info;
+			old->payload_offset = prepared->payload_offset;
+			free(prepared);
+		} else {
+			memmove(source->record_index + low,
+				source->record_index + low + 1,
+				(source->record_count - low - 1) *
+					sizeof(*source->record_index));
+			source->record_count--;
+			if (old->previous)
+				old->previous->next = old->next;
+			else
+				source->records = old->next;
+			if (old->next)
+				old->next->previous = old->previous;
+			cache->records[slot] = NULL;
+			pg_record_release(old);
+		}
+	} else if (prepared) {
+		size_t low = 0, high = source->record_count;
+
+		while (low < high) {
+			size_t middle = low + (high - low) / 2;
+
+			if (pg_source_record_order(
+				&source->record_index[middle], &prepared) <
+				0)
+				low = middle + 1;
+			else
+				high = middle;
+		}
+		memmove(source->record_index + low + 1,
+			source->record_index + low,
+			(source->record_count - low) *
+				sizeof(*source->record_index));
+		source->record_index[low] = prepared;
+		source->record_count++;
+		prepared->next = source->records;
+		if (source->records)
+			source->records->previous = prepared;
+		source->records = prepared;
+		cache->records[slot] = prepared;
+		source->context->next_id++;
+	}
+	source->generation++;
 }
 
 static pg_source_record *pg_source_index_last(
@@ -90,8 +437,20 @@ static pg_source_record *pg_source_index_last(
 		: NULL;
 }
 
-static void pg_source_index_scope(pg_source_record **items,
-	size_t count, const char *prefix, size_t *begin, size_t *end)
+pg_status pg_source_record_find(
+	pg_source *source, const char *name, pg_source_record **out)
+{
+	pg_source_record **items;
+	size_t count;
+	pg_status status = pg_source_index_get(source, &items, &count);
+
+	*out = status == PG_OK ? pg_source_index_last(items, count, name)
+			: NULL;
+	return status;
+}
+
+static void pg_source_index_scope(pg_source_record **items, size_t count,
+	const char *prefix, size_t *begin, size_t *end)
 {
 	size_t low = 0, high = count;
 
@@ -299,11 +658,7 @@ static void pg_source_records_free(pg_source_record *record)
 	while (record) {
 		pg_source_record *next = record->next;
 
-		free((void *)record->info.canonical_name);
-		free((void *)record->info.original_name);
-		free((void *)record->info.cached_header);
-		free(record->native_path);
-		free(record);
+		pg_record_release(record);
 		record = next;
 	}
 }
@@ -1786,6 +2141,7 @@ static pg_status pg_source_release_coordinated(
 	*native_code = closed ? errno : 0;
 	pg_context_child_drop(source->context);
 	pg_source_index_clear(source);
+	pg_source_hogg_cache_clear(source);
 	pg_source_records_free(source->records);
 	pg_source_requests_free(source->exact_requests);
 	pg_source_requests_free(source->prefix_requests);
@@ -1856,6 +2212,13 @@ static pg_status pg_source_hogg_commit(pg_source *source,
 			return pg_native_result(
 				status, native_code, error);
 	}
+	status = pg_hogg_cache_ensure(source);
+	if (status != PG_OK)
+		return pg_result(status, error);
+	pg_source_record *prepared = NULL;
+	status = pg_hogg_record_prepare(source, frame, &prepared);
+	if (status != PG_OK)
+		return pg_result(status, error);
 	pg_wire_u32(length, frame_size);
 	pg_wire_u32(terminator, 0xdeabac05);
 	status = pg_source_write_span(
@@ -1873,10 +2236,15 @@ static pg_status pg_source_hogg_commit(pg_source *source,
 		pg_native_result(PG_INDETERMINATE, native_code, error);
 		if (error)
 			error->cause = PG_IO;
+		if (prepared)
+			pg_record_release(prepared);
 		return PG_INDETERMINATE;
 	}
-	if (status != PG_OK)
+	if (status != PG_OK) {
+		if (prepared)
+			pg_record_release(prepared);
 		return pg_native_result(status, native_code, error);
+	}
 	source->recovery_required = 1;
 	status = pg_source_recover(
 		source->context, source->native_path, error);
@@ -1889,6 +2257,10 @@ static pg_status pg_source_hogg_commit(pg_source *source,
 		}
 		status = PG_RECOVERY_REQUIRED;
 	}
+	if (status == PG_OK && pg_read_u32(frame) != 5)
+		pg_hogg_record_publish(source, frame, prepared);
+	else if (prepared)
+		pg_record_release(prepared);
 	return status;
 }
 
@@ -2652,6 +3024,8 @@ static pg_status pg_source_hogg_fold(pg_source *source,
 	pg_wire_u32(frame, 6);
 	pg_wire_u64(frame + 8, journal_at);
 	status = pg_source_hogg_commit(source, frame, 16, error);
+	if (status == PG_OK && source->hogg_cache)
+		source->hogg_cache->data_count = count;
 
 done:
 	free(packed);
@@ -2775,7 +3149,41 @@ static pg_status pg_source_hogg_grow(pg_source *source, pg_error *error)
 	pg_wire_u32(frame + 12, eas);
 	pg_wire_u32(frame + 16, (uint32_t)new_ea);
 	pg_wire_u32(frame + 20, new_ea_bytes);
-	status = pg_source_hogg_commit(source, frame, 28, error);
+	{
+		pg_hogg_cache *cache = source->hogg_cache;
+		uint8_t *file_cache = (uint8_t *)calloc(1, new_file_bytes);
+		pg_source_record **records = (pg_source_record **)calloc(
+			new_file_bytes / 32, sizeof(*records));
+
+		if (!file_cache || !records) {
+			free(file_cache);
+			free(records);
+			status = PG_NOMEM;
+			goto done_grow;
+		}
+		memcpy(file_cache, cache->files, files);
+		memcpy(records, cache->records,
+			(size_t)cache->file_count * sizeof(*records));
+		for (uint32_t j = files; j < new_file_bytes; j += 32)
+			pg_wire_u32(file_cache + j + 8, UINT32_MAX);
+		status = pg_source_hogg_commit(source, frame, 28, error);
+		if (status == PG_OK) {
+			free(cache->files);
+			free(cache->eas);
+			free(cache->records);
+			cache->files = file_cache;
+			cache->records = records;
+			cache->eas = new_eas;
+			new_eas = NULL;
+			cache->file_count = new_file_bytes / 32;
+			cache->ea_count = new_ea_bytes / 16;
+			pg_wire_u32(cache->header + 8, new_file_bytes);
+			pg_wire_u32(cache->header + 12, new_ea_bytes);
+		} else {
+			free(file_cache);
+			free(records);
+		}
+	}
 
 done_grow:
 	free(new_eas);
@@ -2833,67 +3241,15 @@ static pg_status pg_source_hogg_stage(
 					: pg_read_u32(journal + 4);
 	if (selected > (uint32_t)pg_read_u16(header + 20) - 12u)
 		return pg_result(PG_CORRUPT, error);
-	uint8_t *data_bytes = NULL;
-	pg_pool_value *data_slots = NULL;
-
-	status = pg_hogg_data(source, table, ea_base,
-		ea_base + 16 * (uint64_t)eas, files, eas, dl_file,
-		&data_bytes, &data_slots, &data_count);
-	free(data_slots);
-	free(data_bytes);
+	status = pg_hogg_cache_ensure(source);
 	if (status != PG_OK)
 		return pg_result(status, error);
-	if (selected) {
-		uint8_t *stream = (uint8_t *)malloc(selected);
-		uint32_t at = 0;
-
-		if (!stream)
-			return pg_result(PG_NOMEM, error);
-		status = pg_read_span(source->fd, current.st_size,
-			journal_at + 12, stream, selected);
-		if (status == PG_OK) {
-			while (at < selected) {
-				uint32_t id, size;
-				uint8_t opcode = stream[at++];
-
-				if (selected - at < 4) {
-					status = PG_CORRUPT;
-					break;
-				}
-				id = pg_read_u32(stream + at);
-				at += 4;
-				if (id == UINT32_MAX) {
-					status = PG_CORRUPT;
-					break;
-				}
-				if (id >= data_count)
-					data_count = id + 1;
-				if (opcode == 2)
-					continue;
-				if (opcode != 1 || selected - at < 4) {
-					status = PG_CORRUPT;
-					break;
-				}
-				size = pg_read_u32(stream + at);
-				at += 4;
-				if (!size || size > selected - at) {
-					status = PG_CORRUPT;
-					break;
-				}
-				at += size;
-			}
-		}
-		free(stream);
-		if (status != PG_OK)
-			return pg_result(status, error);
-	}
-	pg_source_record *latest = NULL;
-
-	for (record = source->records; record; record = record->next)
-		if (writer->target_copy_id &&
-			record->info.copy_id == writer->target_copy_id)
-			latest = record;
-	record = latest;
+	pg_hogg_cache *cache = source->hogg_cache;
+	data_count = cache->data_count;
+	record = writer->target_copy_id
+		? pg_source_copy_record(
+			source, writer->target_record, writer->target_copy_id)
+		: NULL;
 	if (record) {
 		slot = (uint32_t)record->info.archive_record;
 		status = pg_read_span(source->fd, current.st_size,
@@ -2913,31 +3269,22 @@ static pg_status pg_source_hogg_stage(
 	} else {
 		uint32_t i;
 
-		for (i = 0; i < files; i++) {
-			status = pg_read_span(source->fd,
-				current.st_size,
-				table + 32 * (uint64_t)i, disk,
-				sizeof(disk));
-			if (status != PG_OK)
-				return pg_result(status, error);
+		for (i = cache->free_file; i < files; i++) {
 			if (i != dl_file &&
-				pg_read_u32(disk + 8) == UINT32_MAX) {
+				pg_read_u32(cache->files + 32 * (size_t)i +
+					8) == UINT32_MAX) {
 				slot = i;
 				break;
 			}
 		}
-		for (i = 0; i < eas; i++) {
-			status = pg_read_span(source->fd,
-				current.st_size,
-				ea_base + 16 * (uint64_t)i, ea,
-				sizeof(ea));
-			if (status != PG_OK)
-				return pg_result(status, error);
-			if (pg_read_u32(ea + 12) & 1) {
+		cache->free_file = i;
+		for (i = cache->free_ea; i < eas; i++) {
+			if (pg_read_u32(cache->eas + 16 * (size_t)i + 12) & 1) {
 				ea_slot = i;
 				break;
 			}
 		}
+		cache->free_ea = i;
 		if (slot == UINT32_MAX || ea_slot == UINT32_MAX) {
 			status = pg_source_hogg_grow(source, error);
 			if (status != PG_OK)
@@ -2968,13 +3315,10 @@ static pg_status pg_source_hogg_stage(
 		current = source->identity;
 		selected = 0;
 		action_size = 0;
-		record = NULL;
-		for (pg_source_record *item = source->records; item;
-			item = item->next)
-			if (item->info.copy_id == writer->target_copy_id) {
-				record = item;
-				break;
-			}
+		record = writer->target_copy_id
+			? pg_source_copy_record(source, writer->target_record,
+				writer->target_copy_id)
+			: NULL;
 	}
 	if (!writer->metadata_only &&
 		fseeko(writer->builder->staging, 0, SEEK_SET))
@@ -3079,8 +3423,8 @@ static pg_status pg_source_hogg_stage(
 	pg_wire_u32(frame + 52, name_id);
 	pg_wire_u32(frame + 56, header_id);
 	source->changed_record = slot;
-	return pg_source_hogg_commit(
-		source, frame, sizeof(frame), error);
+	source->mutation_entry = entry;
+	return pg_source_hogg_commit(source, frame, sizeof(frame), error);
 }
 
 static pg_status pg_source_archive_finish_locked(
@@ -3099,16 +3443,12 @@ static pg_status pg_source_archive_finish_locked(
 		!pg_native_stat_same(&current, &path_state))
 		return pg_result(PG_STALE, error);
 	if (writer->target_copy_id) {
-		for (record = source->records; record;
-			record = record->next) {
-			if (record->info.copy_id ==
-					writer->target_copy_id &&
-				record->info.copy_generation ==
-					writer->target_copy_generation &&
-				record->info.archive_record ==
-					writer->target_record)
-				break;
-		}
+		record = pg_source_copy_record(
+			source, writer->target_record, writer->target_copy_id);
+		if (record &&
+			record->info.copy_generation !=
+				writer->target_copy_generation)
+			record = NULL;
 		if (!record)
 			return pg_result(PG_STALE, error);
 	}
@@ -3154,6 +3494,7 @@ pg_status pg_source_hogg_delete(pg_file *file, pg_error *error)
 
 	pg_source_mutation_refresh(source, status);
 	source->internal_mutation = 0;
+	source->mutation_entry = NULL;
 	source->changed_record = UINT64_MAX;
 	pg_source_unlock(source);
 	return status;
@@ -3170,6 +3511,7 @@ pg_status pg_source_archive_finish(pg_writer *writer, pg_error *error)
 
 	pg_source_mutation_refresh(source, status);
 	source->internal_mutation = 0;
+	source->mutation_entry = NULL;
 	source->changed_record = UINT64_MAX;
 	pg_source_unlock(source);
 	return status;
@@ -3186,11 +3528,11 @@ static pg_status pg_source_metadata_locked(pg_file *file,
 
 	if (source->live_writers)
 		return pg_result(PG_BUSY, error);
-	for (record = source->records; record; record = record->next)
-		if (record->info.copy_id == file->info.copy_id &&
-			record->info.copy_generation ==
-				file->info.copy_generation)
-			break;
+	record = pg_source_copy_record(
+		source, file->info.archive_record, file->info.copy_id);
+	if (record &&
+		record->info.copy_generation != file->info.copy_generation)
+		record = NULL;
 	if (!record)
 		return pg_result(PG_STALE, error);
 	if (fstat(source->fd, &current) ||
@@ -3288,6 +3630,7 @@ static pg_status pg_source_metadata_locked(pg_file *file,
 	writer.source = source;
 	writer.target_copy_id = record->info.copy_id;
 	writer.metadata_only = 1;
+	writer.target_record = record->info.archive_record;
 	return pg_source_hogg_stage(&writer, error);
 }
 
@@ -3303,6 +3646,7 @@ pg_status pg_source_update_metadata(pg_file *file,
 
 	pg_source_mutation_refresh(source, status);
 	source->internal_mutation = 0;
+	source->mutation_entry = NULL;
 	source->changed_record = UINT64_MAX;
 	pg_source_unlock(source);
 	return status;
@@ -3893,18 +4237,21 @@ pg_status pg_source_select(pg_source *source,
 	if (!file)
 		return pg_result(PG_NOMEM, error);
 	file->info = selected->info;
+	file->info.source_generation = source->generation;
 	file->info.canonical_name =
 		strdup(selected->info.canonical_name);
 	file->info.original_name = strdup(selected->info.original_name);
 	file->info.cached_header = NULL;
-	if (selected->info.cached_header_size) {
-		file->info.cached_header =
-			malloc(selected->info.cached_header_size);
-		if (file->info.cached_header)
-			memcpy((void *)file->info.cached_header,
-				selected->info.cached_header,
-				selected->info.cached_header_size);
+	if (selected->header_blob) {
+		file->header_blob = selected->header_blob;
+		++file->header_blob->references;
+	} else if (selected->info.cached_header_size) {
+		file->header_blob = pg_header_copy(
+			selected->info.cached_header,
+			selected->info.cached_header_size);
 	}
+	if (file->header_blob)
+		file->info.cached_header = file->header_blob + 1;
 	if (selected->native_path)
 		file->native_path = strdup(selected->native_path);
 	if (!file->info.canonical_name || !file->info.original_name ||
@@ -3913,7 +4260,7 @@ pg_status pg_source_select(pg_source *source,
 			!file->info.cached_header)) {
 		free((void *)file->info.canonical_name);
 		free((void *)file->info.original_name);
-		free((void *)file->info.cached_header);
+		pg_header_release(file->header_blob, file->info.cached_header);
 		free(file->native_path);
 		free(file);
 		return pg_result(PG_NOMEM, error);
@@ -3922,7 +4269,7 @@ pg_status pg_source_select(pg_source *source,
 	if (status != PG_OK) {
 		free((void *)file->info.canonical_name);
 		free((void *)file->info.original_name);
-		free((void *)file->info.cached_header);
+		pg_header_release(file->header_blob, file->info.cached_header);
 		free(file->native_path);
 		free(file);
 		return pg_result(status, error);
@@ -4119,16 +4466,29 @@ pg_status pg_source_name_kind(pg_source *source, const char *name)
 pg_status pg_source_writer_name_check(
 	pg_source *source, const char *name)
 {
+	pg_source_record **items;
+	size_t count;
+	pg_status indexed = pg_source_index_get(source, &items, &count);
+
+	if (indexed != PG_OK)
+		return indexed;
 	if (pg_source_name_kind(source, name) == PG_CONFLICT)
 		return PG_CONFLICT;
-	for (pg_source_record *record = source->records; record;
-		record = record->next) {
-		const char *ancestor = record->info.canonical_name;
-
-		if (!pg_descendant_order(name, ancestor) &&
-			pg_source_name_kind(source, ancestor) == PG_OK)
+	char *prefix = strdup(name);
+	if (!prefix)
+		return PG_NOMEM;
+	for (char *at = prefix; *at; at++) {
+		if (*at != '/')
+			continue;
+		*at = 0;
+		pg_status status = pg_source_name_kind(source, prefix);
+		*at = '/';
+		if (status == PG_OK) {
+			free(prefix);
 			return PG_CONFLICT;
+		}
 	}
+	free(prefix);
 	return PG_OK;
 }
 
@@ -4401,12 +4761,47 @@ PG_API pg_status PG_CALL pg_source_files(pg_source *source,
 	return pg_source_files_depth(source, prefix, 1, out, error);
 }
 
+static int pg_source_reconcile_compare(
+	pg_source_record *a, pg_source_record *b, int internal)
+{
+	int order = strcmp(a->info.canonical_name, b->info.canonical_name);
+
+	if (!order)
+		order = strcmp(a->info.original_name, b->info.original_name);
+	if (order)
+		return order;
+	uint64_t left = internal ? a->info.archive_record
+				: a->payload_offset;
+	uint64_t right = internal ? b->info.archive_record
+				: b->payload_offset;
+
+	if (left != right)
+		return left < right ? -1 : 1;
+	left = a->info.archive_record;
+	right = b->info.archive_record;
+	return left < right ? -1 : left > right;
+}
+
+static int pg_source_reconcile_external(const void *a, const void *b)
+{
+	return pg_source_reconcile_compare(*(pg_source_record *const *)a,
+		*(pg_source_record *const *)b, 0);
+}
+
+static int pg_source_reconcile_internal(const void *a, const void *b)
+{
+	return pg_source_reconcile_compare(*(pg_source_record *const *)a,
+		*(pg_source_record *const *)b, 1);
+}
+
 static pg_status pg_source_rescan_locked(
 	pg_source *source, pg_error *error, int invalidate = 0)
 {
 	pg_source probe;
 	pg_source_record *record;
 	pg_source_record *old;
+	pg_source_record **matches = NULL;
+	size_t match_count = 0;
 	struct stat current, path_state, final;
 	pg_status status;
 	int native_code = 0;
@@ -4525,6 +4920,7 @@ static pg_status pg_source_rescan_locked(
 	probe.record_count = 0;
 	probe.records = NULL;
 	probe.identity = current;
+	source->full_reconciliations++;
 	status = source->format == PG_PIGG2 ? pg_pigg_index(&probe)
 						: pg_hogg_index(&probe);
 	if (status != PG_OK) {
@@ -4554,25 +4950,47 @@ static pg_status pg_source_rescan_locked(
 		}
 		generation++;
 	}
+	for (old = source->records; old; old = old->next)
+		match_count++;
+	if (match_count > SIZE_MAX / sizeof(*matches))
+		goto limit;
+	matches = (pg_source_record **)malloc(
+		(match_count ? match_count : 1) * sizeof(*matches));
+	if (!matches) {
+		pg_source_records_free(probe.records);
+		return pg_result(PG_NOMEM, error);
+	}
+	{
+		size_t i = 0;
+
+		for (old = source->records; old; old = old->next)
+			matches[i++] = old;
+		qsort(matches, match_count, sizeof(*matches),
+			source->internal_mutation
+				? pg_source_reconcile_internal
+				: pg_source_reconcile_external);
+	}
 	for (record = probe.records; record; record = record->next) {
 		const pg_file_info *a = &record->info;
 		const pg_file_info *b;
+		size_t low = 0, high = match_count;
 
 		record->info.source_id = source->id;
 		record->info.source_generation = generation;
-		for (old = source->records; old; old = old->next) {
-			if ((source->internal_mutation
-						? old->info.archive_record ==
-							record->info
-								.archive_record
-						: old->payload_offset ==
-						record->payload_offset) &&
-				strcmp(old->info.canonical_name,
-					a->canonical_name) == 0 &&
-				strcmp(old->info.original_name,
-					a->original_name) == 0)
-				break;
+		while (low < high) {
+			size_t middle = low + (high - low) / 2;
+
+			if (pg_source_reconcile_compare(matches[middle], record,
+				source->internal_mutation) < 0)
+				low = middle + 1;
+			else
+				high = middle;
 		}
+		old = low < match_count &&
+				!pg_source_reconcile_compare(matches[low],
+					record, source->internal_mutation)
+			? matches[low]
+			: NULL;
 		if (!old) {
 			if (!next_id)
 				goto limit;
@@ -4607,7 +5025,9 @@ static pg_status pg_source_rescan_locked(
 			record->info.copy_generation++;
 		}
 	}
+	free(matches);
 	pg_source_index_clear(source);
+	pg_source_hogg_cache_clear(source);
 	pg_source_records_free(source->records);
 	source->records = probe.records;
 	source->identity = current;
@@ -4616,6 +5036,7 @@ static pg_status pg_source_rescan_locked(
 	return pg_result(PG_OK, error);
 
 limit:
+	free(matches);
 	pg_source_records_free(probe.records);
 	return pg_result(PG_LIMIT, error);
 }
@@ -5142,9 +5563,15 @@ PG_API pg_status PG_CALL pg_source_recover(
 				status = PG_IO;
 			} else {
 				source->recovery_required = 0;
-				status = pg_source_rescan_locked(source,
-					NULL,
-					!source->internal_mutation);
+				if (source->internal_mutation) {
+					if (fstat(source->fd,
+						&source->identity)) {
+						native_code = errno;
+						status = PG_IO;
+					}
+				} else
+					status = pg_source_rescan_locked(
+						source, NULL, 1);
 				source->recovery_required = 1;
 			}
 		}

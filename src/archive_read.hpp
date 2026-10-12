@@ -315,18 +315,17 @@ static inline pg_status pg_pigg_index(pg_source *source)
 			goto cleanup;
 		}
 		if (header_id != UINT32_MAX && headers[header_id].size) {
-			copy->info.cached_header =
-				malloc(headers[header_id].size);
-			if (!copy->info.cached_header) {
+			copy->header_blob = pg_header_copy(
+				headers[header_id].data,
+				headers[header_id].size);
+			if (!copy->header_blob) {
 				free((void *)copy->info.original_name);
 				free((void *)copy->info.canonical_name);
 				free(copy);
 				status = PG_NOMEM;
 				goto cleanup;
 			}
-			memcpy((void *)copy->info.cached_header,
-				headers[header_id].data,
-				headers[header_id].size);
+			copy->info.cached_header = copy->header_blob + 1;
 			copy->info.cached_header_size = headers[header_id].size;
 		}
 		copy->info.archive_record = i;
@@ -751,18 +750,16 @@ static inline pg_status pg_hogg_index(pg_source *source)
 			goto cleanup;
 		}
 		if (header_id != UINT32_MAX) {
-			copy->info.cached_header =
-				malloc(slots[header_id].size);
-			if (!copy->info.cached_header) {
+			copy->header_blob = pg_header_copy(
+				slots[header_id].data, slots[header_id].size);
+			if (!copy->header_blob) {
 				free((void *)copy->info.original_name);
 				free((void *)copy->info.canonical_name);
 				free(copy);
 				status = PG_NOMEM;
 				goto cleanup;
 			}
-			memcpy((void *)copy->info.cached_header,
-				slots[header_id].data,
-				slots[header_id].size);
+			copy->info.cached_header = copy->header_blob + 1;
 			copy->info.cached_header_size = slots[header_id].size;
 		}
 		copy->info.archive_record = i;
