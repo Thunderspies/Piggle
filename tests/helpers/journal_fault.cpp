@@ -3,6 +3,7 @@
 #endif
 #include <errno.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -31,6 +32,11 @@ extern "C" ssize_t pwrite64(
 {
 	const unsigned char *data =
 		static_cast<const unsigned char *>(bytes);
+	if (fault_mode == 12) {
+		fault_mode = 0;
+		errno = ENOSPC;
+		return -1;
+	}
 	int marker = size == 4 && data[0] == 5 && data[1] == 172 &&
 		data[2] == 171 && data[3] == 222;
 
@@ -71,6 +77,7 @@ extern "C" int fsync(int fd)
 
 	if ((fault_mode == 2 && marker_written) ||
 		(fault_mode == 4 && marker_cleared) ||
+		(fault_mode == 18 && replaced) ||
 		(fault_mode == 6 && replaced)) {
 		fault_mode = 0;
 		errno = EIO;
@@ -98,12 +105,30 @@ extern "C" int unlinkat(int fd, const char *path, int flags)
 extern "C" int renameat(
 	int from, const char *old_path, int to, const char *new_path)
 {
+	if ((fault_mode == 17 || fault_mode == 18) && from != to &&
+		!strcmp(new_path, "output")) {
+		replaced = 1;
+		errno = EXDEV;
+		return -1;
+	}
 	int result = (int)syscall(
 		SYS_renameat, from, old_path, to, new_path);
 
 	if (fault_mode == 6 && result == 0)
 		replaced = 1;
 	return result;
+}
+
+extern "C" int linkat(int from, const char *old_path, int to,
+	const char *new_path, int flags)
+{
+	if ((fault_mode == 17 || fault_mode == 18) && from != to &&
+		!strcmp(new_path, "output")) {
+		replaced = 1;
+		errno = EXDEV;
+		return -1;
+	}
+	return (int)syscall(SYS_linkat, from, old_path, to, new_path, flags);
 }
 
 /* Close still consumes the actual descriptor when cleanup reports

@@ -211,8 +211,10 @@ pg_status pg_pack_cursor(pg_cursor **cursor, const char *native_archive,
 	pg_status closed;
 	pg_archive_options profile = {
 		format, options->flags, options->checksum_domain};
-	pg_status status = pg_archive_builder_create_options(
-		(*cursor)->context, native_archive, &profile, &builder,
+	pg_archive_build_options config = {
+		profile, NULL, format == PG_HOGG10 ? (*cursor)->count : 0};
+	pg_status status = pg_archive_builder_create_config(
+		(*cursor)->context, native_archive, &config, &builder,
 		&work_error);
 
 	if (status != PG_OK)
@@ -365,6 +367,22 @@ static pg_status pg_builder_create(pg_context *context, const char *native_path,
 			&native_code);
 		if (status != PG_OK)
 			goto cleanup_parent;
+		if (format == PG_HOGG10) {
+			uint64_t physical =
+				capacity + 1 < 16 ? 16 : capacity + 1;
+
+			if (fseeko(builder->staging,
+				(off_t)(4144 + 48 * physical - 1),
+				SEEK_SET) ||
+				fputc(0, builder->staging) == EOF ||
+				fflush(builder->staging)) {
+				status = PG_IO;
+				native_code = errno;
+				goto cleanup_parent;
+			}
+			builder->private_hogg = 1;
+			builder->metadata_reserved = 4144 + 48 * physical;
+		}
 		builder->context = context;
 		builder->format = format;
 		builder->flags = flags;
@@ -541,6 +559,8 @@ static pg_status pg_archive_builder_finish_locked(
 	size_t length;
 	int published = 0;
 	int uncertain = 0;
+	int temporary_parent = builder ? builder->parent_fd : -1;
+	int direct = 0;
 
 	if (!builder)
 		return pg_result(PG_INVALID, error);
@@ -549,24 +569,50 @@ static pg_status pg_archive_builder_finish_locked(
 	if (builder->live_writers)
 		return pg_result(PG_BUSY, error);
 	builder->finished = 1;
-	length = strlen(builder->native_path);
-	if (length > SIZE_MAX - sizeof(".piggle-XXXXXX"))
-		return pg_result(PG_LIMIT, error);
-	temporary = (char *)malloc(length + sizeof(".piggle-XXXXXX"));
-	if (!temporary)
-		return pg_result(PG_NOMEM, error);
-	memcpy(temporary, builder->native_path, length);
-	memcpy(temporary + length, ".piggle-XXXXXX",
-		sizeof(".piggle-XXXXXX"));
-	fd = mkstemp(temporary);
-	if (fd < 0) {
-		native_code = errno;
-		free(temporary);
-		return pg_native_result(PG_IO, native_code, error);
+	if (builder->private_hogg) {
+		status = pg_hogg_write(builder, builder->staging);
+		if (status != PG_OK)
+			return pg_native_result(status, errno, error);
+		if (fflush(builder->staging) || fsync(fileno(builder->staging)))
+			return pg_native_result(PG_IO, errno, error);
+		struct stat stage_parent, destination_parent;
+
+		if (fstat(builder->staging_parent_fd, &stage_parent) ||
+			fstat(builder->parent_fd, &destination_parent))
+			return pg_native_result(PG_IO, errno, error);
+		direct = stage_parent.st_dev == destination_parent.st_dev;
+	}
+prepare_temporary:
+	if (direct) {
+		temporary = strdup(builder->staging_path);
+		if (!temporary)
+			return pg_result(PG_NOMEM, error);
+		temporary_parent = builder->staging_parent_fd;
+		fd = dup(fileno(builder->staging));
+		if (fd < 0) {
+			free(temporary);
+			return pg_native_result(PG_IO, errno, error);
+		}
+	} else {
+		length = strlen(builder->native_path);
+		if (length > SIZE_MAX - sizeof(".piggle-XXXXXX"))
+			return pg_result(PG_LIMIT, error);
+		temporary = (char *)malloc(length + sizeof(".piggle-XXXXXX"));
+		if (!temporary)
+			return pg_result(PG_NOMEM, error);
+		memcpy(temporary, builder->native_path, length);
+		memcpy(temporary + length, ".piggle-XXXXXX",
+			sizeof(".piggle-XXXXXX"));
+		fd = mkstemp(temporary);
+		if (fd < 0) {
+			native_code = errno;
+			free(temporary);
+			return pg_native_result(PG_IO, native_code, error);
+		}
 	}
 	temporary_leaf = pg_native_basename(temporary);
 	if (fstat(fd, &created) ||
-		fstatat(builder->parent_fd, temporary_leaf, &pinned,
+		fstatat(temporary_parent, temporary_leaf, &pinned,
 			AT_SYMLINK_NOFOLLOW) ||
 		!pg_native_stat_same(&created, &pinned)) {
 		native_code = errno;
@@ -574,21 +620,43 @@ static pg_status pg_archive_builder_finish_locked(
 		status = PG_RETRY;
 		goto remove_temporary;
 	}
-	out = fdopen(fd, "wb");
+	out = fdopen(fd, direct ? "r+b" : "wb");
 	if (!out) {
 		native_code = errno;
 		close(fd);
 		status = PG_IO;
 		goto remove_temporary;
 	}
-	status = builder->format == PG_PIGG2
-		? pg_pigg_write(builder, out)
-		: pg_hogg_write(builder, out);
+	if (direct)
+		status = PG_OK;
+	else if (builder->private_hogg) {
+		uint8_t bytes[65536];
+
+		status = fseeko(builder->staging, 0, SEEK_SET) ? PG_IO : PG_OK;
+		while (status == PG_OK) {
+			size_t count = fread(
+				bytes, 1, sizeof(bytes), builder->staging);
+
+			if (count && fwrite(bytes, 1, count, out) != count)
+				status = PG_IO;
+			builder->whole_archive_copied_bytes += count;
+			if (count < sizeof(bytes)) {
+				if (ferror(builder->staging))
+					status = PG_IO;
+				break;
+			}
+		}
+	} else
+		status = pg_pigg_write(builder, out);
 	if (status == PG_OK && fflush(out)) {
 		native_code = errno;
 		status = PG_IO;
 	}
 	if (status == PG_OK && fsync(fd)) {
+		native_code = errno;
+		status = PG_IO;
+	}
+	if (status == PG_OK && fstat(fd, &created)) {
 		native_code = errno;
 		status = PG_IO;
 	}
@@ -602,16 +670,17 @@ static pg_status pg_archive_builder_finish_locked(
 	if (status != PG_OK)
 		goto remove_temporary;
 	status = pg_native_alias(builder->context, builder->parent_fd,
-		&builder->target, builder->target_exists, NULL,
-		&native_code);
+		&builder->target, builder->target_exists, NULL, &native_code);
 	if (status != PG_OK)
 		goto remove_temporary;
 	if (builder->flags & PG_OVERWRITE) {
-		if (renameat(builder->parent_fd, temporary_leaf,
-				builder->parent_fd, builder->leaf)) {
+		if (renameat(temporary_parent, temporary_leaf,
+			builder->parent_fd, builder->leaf)) {
 			int target_read;
 
 			native_code = errno;
+			if (direct && native_code == EXDEV)
+				goto copy_temporary;
 			target_read = !fstatat(builder->parent_fd,
 				builder->leaf, &pinned,
 				AT_SYMLINK_NOFOLLOW);
@@ -633,9 +702,11 @@ static pg_status pg_archive_builder_finish_locked(
 		}
 		published = 1;
 	} else {
-		if (linkat(builder->parent_fd, temporary_leaf,
-				builder->parent_fd, builder->leaf, 0)) {
+		if (linkat(temporary_parent, temporary_leaf, builder->parent_fd,
+			builder->leaf, 0)) {
 			native_code = errno;
+			if (direct && native_code == EXDEV)
+				goto copy_temporary;
 			if (!fstatat(builder->parent_fd, builder->leaf,
 					&pinned, AT_SYMLINK_NOFOLLOW) &&
 				pg_native_stat_same(
@@ -650,7 +721,7 @@ static pg_status pg_archive_builder_finish_locked(
 			goto remove_temporary;
 		}
 		published = 1;
-		if (unlinkat(builder->parent_fd, temporary_leaf, 0)) {
+		if (unlinkat(temporary_parent, temporary_leaf, 0)) {
 			native_code = errno;
 			status = PG_IO;
 			goto remove_temporary;
@@ -663,6 +734,14 @@ static pg_status pg_archive_builder_finish_locked(
 	}
 	free(temporary);
 	return pg_result(PG_OK, error);
+
+copy_temporary:
+	/* Bind mounts can reject publication even when device IDs match. */
+	free(temporary);
+	direct = 0;
+	temporary_parent = builder->parent_fd;
+	native_code = 0;
+	goto prepare_temporary;
 
 remove_temporary:
 	if (!published && status != PG_INDETERMINATE)

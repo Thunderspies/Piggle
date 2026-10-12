@@ -13,6 +13,9 @@ int piggle_c11_contract(void)
 		&builder, &contract_error) != PG_INVALID ||
 		builder)
 		return 1;
+	if (pg_source_set_staging_directory(NULL, NULL, &contract_error) !=
+		PG_INVALID)
+		return 1;
 	pg_context *context = NULL;
 	pg_error error;
 	char name[32];

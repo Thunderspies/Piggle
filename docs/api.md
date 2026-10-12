@@ -767,4 +767,14 @@ The journals remain 1,024 and 3,096 bytes, and archives remain HOGG v10.
 `pg_archive_build_options.staging_directory` is optional. Creation copies and
 resolves it before returning; it must name an existing directory. The default
 builder directory is the destination's parent. Entry input and compression
-scratch inherit the builder policy.
+scratch inherit the builder policy. `pg_source_set_staging_directory` controls
+scratch for existing archive writers; NULL resets the source policy to library
+defaults. A live writer rejects policy changes with `PG_BUSY`. Loose sources
+return `PG_UNSUPPORTED` and read-only archives return `PG_READ_ONLY`.
+
+HOGG construction appends validated stored bytes to one private archive. Finish
+assembles metadata, relocating only payloads covered by an expanded table
+reservation. It publishes that file directly on the destination filesystem.
+Across filesystems it copies once into a destination-side temporary archive,
+then atomically publishes it. PIGG retains its assembly path. Pack and compaction
+reserve their captured inventory count before transferring payloads.
