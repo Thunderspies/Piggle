@@ -19,7 +19,8 @@ execute_process(
 	COMMAND ${CMAKE_COMMAND} -E env
 		"BUNDLE_GEMFILE=${PROJECT_SOURCE_DIR}/Gemfile"
 		"BUNDLE_FROZEN=true"
-		"${BUNDLER_EXECUTABLE}" check
+		"${RUBY_EXECUTABLE}" -rrubygems -e
+		"load Gem.activate_bin_path('bundler', 'bundle')" -- check
 	WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 	RESULT_VARIABLE bundle_result
 	OUTPUT_VARIABLE bundle_output
