@@ -75,8 +75,9 @@ inline uint32_t get_le32(const std::string &bytes, size_t offset)
 	return value;
 }
 
-inline void set_le32(std::string &bytes, size_t offset, uint32_t value)
+inline void set_le32(std::string &bytes, size_t offset, uint64_t value)
 {
+	ASSERT_LE(value, UINT32_MAX);
 	for (unsigned i = 0; i < 4; ++i)
 		bytes.at(offset + i) =
 			static_cast<char>(value >> (8 * i));
@@ -131,12 +132,13 @@ inline void raw_pigg(const std::string &path, const WorldFiles &files,
 /* Independent UPDATE frame with unchanged payload identity and a new
  * mtime. */
 inline void commit_timestamp(
-	const std::string &path, uint32_t slot, uint32_t mtime)
+	const std::string &path, uint64_t slot, uint32_t mtime)
 {
+	ASSERT_LE(slot, UINT32_MAX);
 	std::string archive = read_native(path);
 	uint32_t op_size = get_le32(archive, 4) >> 16;
 	uint32_t dl_size = get_le32(archive, 20) & 0xffff;
-	size_t record = 24 + op_size + dl_size + 32 * slot;
+	size_t record = 24 + op_size + dl_size + 32 * static_cast<size_t>(slot);
 	std::string frame(56, '\0');
 
 	set_le32(frame, 0, 3);
