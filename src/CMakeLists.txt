@@ -9,6 +9,7 @@ add_library(piggle
 	managed.cpp
 	native_path.cpp
 	source.cpp
+	storage.cpp
 	staging.cpp
 	tree.cpp
 	types.cpp

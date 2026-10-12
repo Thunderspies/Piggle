@@ -37,6 +37,8 @@ using ::pg_reader_info;
 using reader_info = ::pg_reader_info;
 using ::pg_source;
 using source = ::pg_source;
+using ::pg_source_storage_info;
+using source_storage_info = ::pg_source_storage_info;
 using ::pg_source_info;
 using source_info = ::pg_source_info;
 using ::pg_source_options;

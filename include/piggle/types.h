@@ -199,6 +199,24 @@ typedef struct pg_archive_build_options {
 	uint64_t hogg_user_capacity;
 } pg_archive_build_options;
 
+/* Physical accounting of indexed archive state, after native revalidation.
+ * All fields count bytes, use unioned physical ranges, and are 64-bit.
+ * live_payload_bytes includes hidden and unnamed active user records.
+ * metadata_bytes includes tables, journals, reserve and internal DataList.
+ * live_payload_bytes + metadata_bytes + unreferenced_bytes == physical_length.
+ * Metadata overlaps assigned to live payload are not counted again.
+ * compacted_size estimates a default HOGG of source-visible winners only;
+ * reclaimable_bytes is max(physical_length - compacted_size, 0).
+ */
+typedef struct pg_source_storage_info {
+	uint64_t physical_length;
+	uint64_t live_payload_bytes;
+	uint64_t metadata_bytes;
+	uint64_t unreferenced_bytes;
+	uint64_t compacted_size;
+	uint64_t reclaimable_bytes;
+} pg_source_storage_info;
+
 /* Reader metadata: size counts bytes exposed by this representation.
  * Native readers are LOGICAL, with size==logical_size and native mtime.
  */
