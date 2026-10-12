@@ -43,6 +43,27 @@ PG_API pg_status PG_CALL pg_source_inspect(pg_source *source,
 PG_API pg_status PG_CALL pg_source_set_staging_directory(pg_source *source,
 		const char *native_directory, pg_error *error);
 
+/* Inspect indexed archive storage; source/out required, zero out on failure.
+ * Archives only; loose -> UNSUPPORTED. Native identity changes -> STALE;
+ * external edits require explicit rescan. Workers allowed. Revalidates identity
+ * before and after accounting; no mutation or implicit rescan.
+ */
+PG_API pg_status PG_CALL pg_source_storage_inspect(pg_source *source,
+		pg_source_storage_info *out, pg_error *error);
+
+/* Build a separate HOGG from source-visible winners using validated stored
+ * transfers. Preserve spelling, mtime, headers, checksum profile and supported
+ * stored encodings; omit hidden copies. NULL options uses the source profile
+ * and scratch policy with exclusive output. Explicit options must select
+ * HOGG10 and the source checksum profile. Source/destination aliases
+ * return PG_CONFLICT.
+ * Source is preserved; caller activates the output. Control-thread rules and
+ * publication outcomes match source_pack; no automatic replacement of source.
+ */
+PG_API pg_status PG_CALL pg_source_compact(pg_source *source,
+		const char *native_destination,
+		const pg_archive_build_options *options, pg_error *error);
+
 /* Common tasks; named streaming uses pg_reader_open_source in io.h. */
 /* Read a named visible logical file into caller storage. Compose
  * source_find, file_read_all and file_close; no caller-owned temporary.

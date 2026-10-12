@@ -9,6 +9,8 @@ namespace piggle
 using ::pg_source_open;
 using ::pg_source_inspect;
 using ::pg_source_set_staging_directory;
+using ::pg_source_storage_inspect;
+using ::pg_source_compact;
 using ::pg_source_read_all;
 using ::pg_source_read_all_alloc;
 using ::pg_source_write_all;

@@ -13,8 +13,14 @@ int piggle_c11_contract(void)
 		&builder, &contract_error) != PG_INVALID ||
 		builder)
 		return 1;
+	pg_source_storage_info storage;
 	if (pg_source_set_staging_directory(NULL, NULL, &contract_error) !=
-		PG_INVALID)
+			PG_INVALID ||
+		pg_source_storage_inspect(NULL, &storage, &contract_error) !=
+			PG_INVALID ||
+		storage.physical_length ||
+		pg_source_compact(NULL, "invalid", NULL, &contract_error) !=
+			PG_INVALID)
 		return 1;
 	pg_context *context = NULL;
 	pg_error error;
