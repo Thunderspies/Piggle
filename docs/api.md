@@ -739,3 +739,14 @@ contents and pending values under fresh IDs. Existing references remain valid
 while the replacement record is published and folded actions are cleared.
 Compressed DataLists are republished with matching encoding metadata. The user
 record is published last; unrelated entries remain valid at each boundary.
+
+## Indexed HOGG mutation
+
+Known HOGG mutations prepare metadata before committing redo and update the
+indexed records directly. MOVE preserves unchanged copy identities; replacements
+and deletion invalidate only the affected selections. External change and
+explicit recovery retain full validation and reconciliation, whose matching work
+is bounded by O(N log N). The canonical source array still shifts a suffix of
+pointers for insertion or deletion. DataList folding, table growth, source
+listings and tree observation snapshots can traverse metadata; these are not
+ordinary replacement work.

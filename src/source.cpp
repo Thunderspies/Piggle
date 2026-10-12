@@ -3221,11 +3221,9 @@ pigg_done:
 	free(records);
 	free(names);
 	free(headers);
-	if (status != PG_OK && status != PG_COMMITTED && probe.records) {
-		free(probe.slot_index);
-		pg_source_index_clear(&probe);
-		pg_source_records_free(probe.records);
-	}
+	free(probe.slot_index);
+	pg_source_index_clear(&probe);
+	pg_source_records_free(probe.records);
 	pg_native_result(status, native_code, error);
 	if (status == PG_COMMITTED && error)
 		error->cause = PG_IO;

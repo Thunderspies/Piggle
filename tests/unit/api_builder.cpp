@@ -307,4 +307,85 @@ TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
 }
 
 #endif
+
+TEST_F(ApiBuilder, KnownMutationAvoidsReconciliation)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *source = NULL;
+	pg_error error;
+	EXPECT_STATUS(pg_context_open(&context, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_create(context, "indexed", PG_HOGG10,
+			0, &builder, &error),
+		PG_OK);
+	EXPECT_STATUS(pg_archive_builder_write_all(
+			builder, "keep", "safe", 4, NULL, &error),
+		PG_OK);
+	EXPECT_STATUS(pg_archive_builder_finish(builder, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_close(&builder, &error), PG_OK);
+	pg_source_options writable = {PG_HOGG10, PG_WRITE, 0};
+	EXPECT_STATUS(
+		pg_source_open(context, "indexed", &writable, &source, &error),
+		PG_OK);
+	for (unsigned i = 0; i < 40; i++) {
+		char name[30];
+		snprintf(name, sizeof(name), "new/%08u", i);
+		EXPECT_STATUS(
+			pg_source_write_all(source, name, "x", 1, NULL, &error),
+			PG_OK);
+	}
+	EXPECT_EQ(0u, source->full_reconciliations);
+	EXPECT_STATUS(pg_source_close(&source, &error), PG_OK);
+	EXPECT_STATUS(pg_context_close(&context, &error), PG_OK);
+}
+
+TEST_F(ApiBuilder, FailedTreeRefreshDropsMutationCache)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *healthy = NULL, *broken = NULL;
+	pg_tree *tree = NULL;
+	pg_error error;
+	EXPECT_STATUS(pg_context_open(&context, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_create(context, "healthy", PG_HOGG10,
+			0, &builder, &error),
+		PG_OK);
+	EXPECT_STATUS(pg_archive_builder_write_all(
+			builder, "keep", "old", 3, NULL, &error),
+		PG_OK);
+	EXPECT_STATUS(pg_archive_builder_finish(builder, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_close(&builder, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_create(
+			context, "broken", PG_PIGG2, 0, &builder, &error),
+		PG_OK);
+	EXPECT_STATUS(pg_archive_builder_finish(builder, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_close(&builder, &error), PG_OK);
+	pg_source_options writable = {PG_HOGG10, PG_WRITE, 0};
+	EXPECT_STATUS(
+		pg_source_open(context, "healthy", &writable, &healthy, &error),
+		PG_OK);
+	EXPECT_STATUS(
+		pg_source_write_all(healthy, "keep", "new", 3, NULL, &error),
+		PG_OK);
+	ASSERT_NE(nullptr, healthy->hogg_cache);
+	EXPECT_STATUS(pg_source_open(context, "broken", NULL, &broken, &error),
+		PG_OK);
+	EXPECT_STATUS(pg_tree_create(context, &tree, &error), PG_OK);
+	EXPECT_STATUS(pg_tree_attach(tree, broken, &error), PG_OK);
+	EXPECT_STATUS(pg_tree_attach(tree, healthy, &error), PG_OK);
+	ASSERT_EQ(0, put_bytes("broken", NULL, 0));
+	EXPECT_STATUS(pg_tree_rescan(tree, &error), PG_CORRUPT);
+	EXPECT_EQ(nullptr, healthy->hogg_cache);
+	char bytes[3];
+	size_t count;
+	EXPECT_STATUS(pg_source_read_all(healthy, "keep", bytes, sizeof(bytes),
+			&count, &error),
+		PG_OK);
+	EXPECT_EQ(0, memcmp(bytes, "new", 3));
+	EXPECT_STATUS(pg_tree_close(&tree, &error), PG_OK);
+	EXPECT_STATUS(pg_source_close(&broken, &error), PG_OK);
+	EXPECT_STATUS(pg_source_close(&healthy, &error), PG_OK);
+	EXPECT_STATUS(pg_context_close(&context, &error), PG_OK);
+}
+
 } // namespace

@@ -283,13 +283,12 @@ static pg_status pg_file_verify_locked(pg_file *file, pg_error *error)
 	if (file->source->format == PG_HOGG10) {
 		pg_source_record *record;
 
-		for (record = file->source->records; record;
-			record = record->next)
-			if (record->info.copy_id ==
-					file->info.copy_id &&
-				record->info.copy_generation ==
-					file->info.copy_generation)
-				break;
+		record = pg_source_copy_record(file->source,
+			file->info.archive_record, file->info.copy_id);
+		if (record &&
+			record->info.copy_generation !=
+				file->info.copy_generation)
+			record = NULL;
 		if (!record)
 			return pg_result(PG_STALE, error);
 		offset = record->payload_offset;
@@ -463,7 +462,8 @@ PG_API pg_status PG_CALL pg_file_close(pg_file **file, pg_error *error)
 		pg_tree *origin = owned->origin_tree;
 		free((void *)owned->info.canonical_name);
 		free((void *)owned->info.original_name);
-		free((void *)owned->info.cached_header);
+		pg_header_release(owned->header_blob,
+			owned->info.cached_header);
 		free(owned->native_path);
 		status = pg_source_release(owned->source, &native_code);
 		free(owned);
