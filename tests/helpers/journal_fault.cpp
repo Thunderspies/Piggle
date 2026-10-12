@@ -3,6 +3,7 @@
 #endif
 #include <errno.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -29,8 +30,7 @@ extern "C" void pg_test_journal_fault(int mode)
 extern "C" ssize_t pwrite64(
 	int fd, const void *bytes, size_t size, off64_t offset)
 {
-	const unsigned char *data =
-		static_cast<const unsigned char *>(bytes);
+	const unsigned char *data = static_cast<const unsigned char *>(bytes);
 	if (fault_mode == 12) {
 		fault_mode = 0;
 		errno = ENOSPC;
@@ -73,10 +73,9 @@ extern "C" int fsync(int fd)
 			_exit(2);
 		_exit(0);
 	}
-
 	if ((fault_mode == 2 && marker_written) ||
 		(fault_mode == 4 && marker_cleared) ||
-		(fault_mode == 6 && replaced)) {
+		((fault_mode == 6 || fault_mode == 16) && replaced)) {
 		fault_mode = 0;
 		errno = EIO;
 		return -1;
@@ -103,10 +102,16 @@ extern "C" int unlinkat(int fd, const char *path, int flags)
 extern "C" int renameat(
 	int from, const char *old_path, int to, const char *new_path)
 {
-	int result = (int)syscall(
-		SYS_renameat, from, old_path, to, new_path);
+	if (fault_mode == 9 && !strcmp(new_path, "checkpoint"))
+		_exit(0);
+	int result = (int)syscall(SYS_renameat, from, old_path, to, new_path);
+	if (result == 0 &&
+		((fault_mode == 8 && !strcmp(new_path, "output")) ||
+			(fault_mode == 10 && !strcmp(new_path, "checkpoint"))))
+		_exit(0);
 
-	if (fault_mode == 6 && result == 0)
+	if (result == 0 && (fault_mode == 6 ||
+			(fault_mode == 16 && !strcmp(new_path, "intent"))))
 		replaced = 1;
 	return result;
 }

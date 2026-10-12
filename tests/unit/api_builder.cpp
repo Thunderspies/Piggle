@@ -364,7 +364,8 @@ TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
 		ASSERT_EQ(pid, waitpid(pid, &status, 0));
 		ASSERT_TRUE(WIFEXITED(status));
 		ASSERT_EQ(0, WEXITSTATUS(status));
-		EXPECT_STATUS(pg_source_recover(context, "fold", &error), PG_OK);
+		EXPECT_STATUS(
+			pg_source_recover(context, "fold", &error), PG_OK);
 		EXPECT_STATUS(pg_source_open(context, "fold", NULL, &source,
 				&error), PG_OK);
 		EXPECT_STATUS(pg_source_validate(source, &error), PG_OK);
@@ -381,7 +382,8 @@ TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
 			mode == 15 ? PG_OK : PG_NOT_FOUND);
 		if (file) {
 			pg_file_info info;
-			EXPECT_STATUS(pg_file_inspect(file, &info, &error), PG_OK);
+			EXPECT_STATUS(
+				pg_file_inspect(file, &info, &error), PG_OK);
 			EXPECT_EQ(65536u, info.cached_header_size);
 			EXPECT_STATUS(pg_file_close(&file, &error), PG_OK);
 		}
@@ -718,7 +720,8 @@ TEST_F(ApiBuilder, LowSpaceLeavesNamesAvailable)
 TEST_F(ApiBuilder, UnwritableStagingDirectory)
 {
 	if (!geteuid())
-		GTEST_SKIP() << "Permission denial requires an unprivileged user";
+		GTEST_SKIP()
+			<< "Permission denial requires an unprivileged user";
 	ASSERT_EQ(0, directory("blocked"));
 	ASSERT_EQ(0, chmod("blocked", 0000));
 	pg_context *context = NULL;
@@ -726,9 +729,11 @@ TEST_F(ApiBuilder, UnwritableStagingDirectory)
 	pg_error error;
 	EXPECT_STATUS(pg_context_open(&context, &error), PG_OK);
 	for (uint32_t format : {PG_PIGG2, PG_HOGG10}) {
-		pg_archive_build_options config = {{format, 0, 0}, "blocked", 0};
-		EXPECT_STATUS(pg_archive_builder_create_config(context, "archive",
-				&config, &builder, &error), PG_IO);
+		pg_archive_build_options config = {
+			{format, 0, 0}, "blocked", 0};
+		EXPECT_STATUS(pg_archive_builder_create_config(context,
+				"archive", &config, &builder, &error),
+			PG_IO);
 		EXPECT_EQ(nullptr, builder);
 	}
 	EXPECT_STATUS(pg_context_close(&context, &error), PG_OK);

@@ -20,3 +20,25 @@ Feature: Build and maintain archives with explicit publication
     Then the compacted archive matches the visible source content
     And the original archive remains byte-for-byte unchanged
 
+  @BUILD-004
+  Scenario: Resume only committed construction progress
+    Given a persistent HOGG builder uses a chosen staging directory
+    When I checkpoint one entry and close after adding another entry
+    And I resume the construction session
+    Then its inventory contains only the checkpointed entry
+    And I can add another entry and explicitly publish the archive
+
+  @BUILD-005
+  Scenario: Suspend retains all completed entries
+    Given a persistent HOGG builder uses a chosen staging directory
+    When I add two entries and suspend construction
+    And I resume the construction session
+    Then its inventory retains both entries in insertion order
+    And I can discard construction without publishing an archive
+
+  @BUILD-006
+  Scenario: A copied checkpoint cannot acquire a live payload
+    Given a persistent HOGG builder uses a chosen staging directory
+    When I copy its checkpoint into another session directory
+    Then resuming the copy reports busy without acquiring a builder
+    And the original builder can publish its checkpointed content

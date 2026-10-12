@@ -420,6 +420,51 @@ inline pg_status PG_CALL tracked_pg_archive_builder_create_config(
 	return status;
 }
 
+inline pg_status PG_CALL tracked_pg_archive_builder_create_session(
+	pg_context *context, const char *path, const char *session,
+	const pg_archive_build_options *options, pg_archive_builder **out,
+	pg_error *error)
+{
+	auto status = ::pg_archive_builder_create_session(
+		context, path, session, options, out, error);
+
+	if (status == PG_OK && out && *out)
+		retain(*out, ::pg_archive_builder_close);
+	return status;
+}
+
+inline pg_status PG_CALL tracked_pg_archive_builder_resume(pg_context *context,
+	const char *session, pg_archive_builder **out, pg_error *error)
+{
+	auto status = ::pg_archive_builder_resume(context, session, out, error);
+
+	if (status == PG_OK && out && *out)
+		retain(*out, ::pg_archive_builder_close);
+	return status;
+}
+
+inline pg_status PG_CALL tracked_pg_archive_builder_suspend(
+	pg_archive_builder **builder, pg_error *error)
+{
+	auto before = builder ? *builder : nullptr;
+	auto status = ::pg_archive_builder_suspend(builder, error);
+
+	if (builder && !*builder)
+		forget(before);
+	return status;
+}
+
+inline pg_status PG_CALL tracked_pg_archive_builder_discard(
+	pg_archive_builder **builder, pg_error *error)
+{
+	auto before = builder ? *builder : nullptr;
+	auto status = ::pg_archive_builder_discard(builder, error);
+
+	if (builder && !*builder)
+		forget(before);
+	return status;
+}
+
 inline pg_status PG_CALL tracked_pg_archive_builder_close(
 	pg_archive_builder **builder, pg_error *error)
 {
@@ -578,20 +623,17 @@ inline pg_status PG_CALL tracked_pg_writer_close(
 #define pg_tree_create piggle_test::tracked_pg_tree_create
 #define pg_tree_open piggle_test::tracked_pg_tree_open
 #define pg_tree_source piggle_test::tracked_pg_tree_source
-#define pg_tree_read_all_alloc                                         \
-	piggle_test::tracked_pg_tree_read_all_alloc
+#define pg_tree_read_all_alloc piggle_test::tracked_pg_tree_read_all_alloc
 #define pg_tree_find piggle_test::tracked_pg_tree_find
 #define pg_tree_files piggle_test::tracked_pg_tree_files
 #define pg_tree_close piggle_test::tracked_pg_tree_close
 #define pg_source_open piggle_test::tracked_pg_source_open
-#define pg_source_read_all_alloc                                       \
-	piggle_test::tracked_pg_source_read_all_alloc
+#define pg_source_read_all_alloc piggle_test::tracked_pg_source_read_all_alloc
 #define pg_source_find piggle_test::tracked_pg_source_find
 #define pg_source_files piggle_test::tracked_pg_source_files
 #define pg_source_close piggle_test::tracked_pg_source_close
 #define pg_buffer_free piggle_test::tracked_pg_buffer_free
-#define pg_file_read_all_alloc                                         \
-	piggle_test::tracked_pg_file_read_all_alloc
+#define pg_file_read_all_alloc piggle_test::tracked_pg_file_read_all_alloc
 #define pg_cursor_next piggle_test::tracked_pg_cursor_next
 #define pg_file_close piggle_test::tracked_pg_file_close
 #define pg_cursor_close piggle_test::tracked_pg_cursor_close
@@ -599,14 +641,19 @@ inline pg_status PG_CALL tracked_pg_writer_close(
 #define pg_tree_entries piggle_test::tracked_pg_tree_entries
 #define pg_entry_cursor_next piggle_test::tracked_pg_entry_cursor_next
 #define pg_entry_cursor_close piggle_test::tracked_pg_entry_cursor_close
-#define pg_archive_builder_create                                      \
-	piggle_test::tracked_pg_archive_builder_create
-#define pg_archive_builder_create_options                              \
+#define pg_archive_builder_create piggle_test::tracked_pg_archive_builder_create
+#define pg_archive_builder_create_options                                      \
 	piggle_test::tracked_pg_archive_builder_create_options
-#define pg_archive_builder_create_config \
+#define pg_archive_builder_create_config                                       \
 	piggle_test::tracked_pg_archive_builder_create_config
-#define pg_archive_builder_close                                       \
-	piggle_test::tracked_pg_archive_builder_close
+#define pg_archive_builder_create_session                                      \
+	piggle_test::tracked_pg_archive_builder_create_session
+#define pg_archive_builder_resume piggle_test::tracked_pg_archive_builder_resume
+#define pg_archive_builder_suspend                                             \
+	piggle_test::tracked_pg_archive_builder_suspend
+#define pg_archive_builder_discard                                             \
+	piggle_test::tracked_pg_archive_builder_discard
+#define pg_archive_builder_close piggle_test::tracked_pg_archive_builder_close
 #define pg_reader_open_source piggle_test::tracked_pg_reader_open_source
 #define pg_reader_open_tree piggle_test::tracked_pg_reader_open_tree
 #define pg_reader_open piggle_test::tracked_pg_reader_open
@@ -619,8 +666,7 @@ inline pg_status PG_CALL tracked_pg_writer_close(
 #define pg_writer_open_native piggle_test::tracked_pg_writer_open_native
 #define pg_unpack_target_open piggle_test::tracked_pg_unpack_target_open
 #define pg_writer_open_unpack piggle_test::tracked_pg_writer_open_unpack
-#define pg_unpack_target_close                                         \
-	piggle_test::tracked_pg_unpack_target_close
+#define pg_unpack_target_close piggle_test::tracked_pg_unpack_target_close
 #define pg_writer_close piggle_test::tracked_pg_writer_close
 
 #endif

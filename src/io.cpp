@@ -1845,6 +1845,8 @@ PG_API pg_status PG_CALL pg_writer_open_archive_builder(
 	*out = NULL;
 	if (!builder || !name || !options || builder->finished)
 		return pg_result(PG_INVALID, error);
+	if (builder->visiting)
+		return pg_result(PG_REENTRANT, error);
 	if (builder->live_writers)
 		return pg_result(PG_BUSY, error);
 	status = pg_builder_options_check(builder, options);

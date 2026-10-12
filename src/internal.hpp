@@ -521,8 +521,16 @@ struct pg_archive_builder {
 	char *staging_path;
 	int staging_parent_fd;
 	char *staging_leaf;
-	uint64_t hogg_user_capacity;
 	int private_hogg;
+	char *session_path;
+	int session_fd;
+	int session_lock;
+	int discard_session;
+	int retain_staging;
+	int published;
+	int visiting;
+	uint64_t original_stage_device;
+	uint64_t original_stage_inode;
 	uint64_t payload_copied_bytes;
 	uint64_t whole_archive_copied_bytes;
 	uint64_t relocated_bytes;
@@ -532,6 +540,7 @@ struct pg_archive_builder {
 	pg_builder_entry *entries_tail;
 	pg_builder_entry *name_index;
 	uint64_t entry_count;
+	uint64_t hogg_user_capacity;
 	uint64_t name_comparisons;
 	struct stat target;
 	uint32_t format;
@@ -546,6 +555,9 @@ pg_builder_entry *pg_builder_name_find(pg_archive_builder *builder,
 	const char *name);
 void pg_builder_entry_insert(pg_archive_builder *builder,
 	pg_builder_entry *entry);
+
+pg_status pg_session_publication_prepare(pg_archive_builder *builder,
+	const struct stat *created, pg_error *error);
 
 enum pg_writer_kind {
 	PG_WRITER_BUILDER = 1,
