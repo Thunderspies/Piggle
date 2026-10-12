@@ -6,7 +6,7 @@ piggle_configure_target(c11_consumer)
 
 add_executable(unit_tests main.cpp consumer.cpp transitions.cpp
 	$<TARGET_OBJECTS:c11_consumer>
-	api_builder.cpp api_storage.cpp api_arguments.cpp api_checksum.cpp api_contract.cpp api_cpp.cpp
+	api_session.cpp api_storage.cpp api_builder.cpp api_arguments.cpp api_checksum.cpp api_contract.cpp api_cpp.cpp
 	api_discovery.cpp api_entries.cpp api_flows.cpp api_invalid.cpp
 	api_lease.cpp api_managed.cpp api_memory.cpp api_metadata.cpp
 	api_regressions.cpp api_roundtrip.cpp api_seek.cpp api_state.cpp
@@ -16,8 +16,9 @@ target_link_libraries(unit_tests PRIVATE test_support zlib-ng::zlib
 	Threads::Threads)
 piggle_configure_target(unit_tests)
 target_compile_definitions(unit_tests PRIVATE
+	PIGGLE_TEST_SESSION_PATH="$<TARGET_FILE:session_probe>"
 	PIGGLE_TEST_LEASE_PATH="$<TARGET_FILE:lease_probe>")
-add_dependencies(unit_tests lease_probe)
+add_dependencies(unit_tests lease_probe session_probe)
 if(UNIX)
 	target_compile_definitions(unit_tests PRIVATE
 		PIGGLE_TEST_MEMORY_PATH="$<TARGET_FILE:memory_probe>")

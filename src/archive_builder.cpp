@@ -673,6 +673,17 @@ prepare_temporary:
 		&builder->target, builder->target_exists, NULL, &native_code);
 	if (status != PG_OK)
 		goto remove_temporary;
+	pg_error intent_error;
+
+	status = pg_session_publication_prepare(
+		builder, &created, &intent_error);
+	if (status != PG_OK) {
+		native_code = intent_error.native_code;
+		/* Selecting intent does not publish the destination archive. */
+		if (status == PG_COMMITTED)
+			status = PG_IO;
+		goto remove_temporary;
+	}
 	if (builder->flags & PG_OVERWRITE) {
 		if (renameat(temporary_parent, temporary_leaf,
 			builder->parent_fd, builder->leaf)) {
@@ -732,6 +743,7 @@ prepare_temporary:
 		status = PG_IO;
 		goto remove_temporary;
 	}
+	builder->published = 1;
 	free(temporary);
 	return pg_result(PG_OK, error);
 
@@ -744,7 +756,10 @@ copy_temporary:
 	goto prepare_temporary;
 
 remove_temporary:
-	if (!published && status != PG_INDETERMINATE)
+	builder->published = published;
+	/* Only the original payload file belongs to the checkpoint. */
+	if (!published && (!builder->session_path || !direct) &&
+		status != PG_INDETERMINATE)
 		unlink(temporary);
 	free(temporary);
 	if (published)
@@ -772,6 +787,8 @@ PG_API pg_status PG_CALL pg_archive_builder_close(
 	if (!*builder)
 		return pg_result(PG_OK, error);
 	owned = *builder;
+	if (owned->visiting)
+		return pg_result(PG_REENTRANT, error);
 	if (owned->live_writers)
 		return pg_result(PG_BUSY, error);
 	*builder = NULL;
@@ -779,13 +796,22 @@ PG_API pg_status PG_CALL pg_archive_builder_close(
 	int staged_identity = owned->staging
 		? fstat(fileno(owned->staging), &staged) == 0
 		: 0;
+	if (owned->published && owned->session_path) {
+		staged.st_dev =
+			(decltype(staged.st_dev))owned->original_stage_device;
+		staged.st_ino =
+			(decltype(staged.st_ino))owned->original_stage_inode;
+		staged_identity = 1;
+	}
 	closed = owned->staging ? fclose(owned->staging) : 0;
 	native_code = closed ? errno : 0;
 	if (close(owned->parent_fd) && !closed) {
 		closed = -1;
 		native_code = errno;
 	}
-	if (owned->staging_path) {
+	if (owned->staging_path && !owned->retain_staging &&
+		(!owned->session_path || owned->discard_session ||
+			owned->published)) {
 		struct stat named;
 		int removed = 0;
 
@@ -813,6 +839,19 @@ PG_API pg_status PG_CALL pg_archive_builder_close(
 	free(owned->staging_directory);
 	free(owned->staging_path);
 	free(owned->staging_leaf);
+	if (owned->session_path) {
+		if (owned->session_lock >= 0 && close(owned->session_lock) &&
+			!closed) {
+			closed = -1;
+			native_code = errno;
+		}
+		if (owned->session_fd >= 0 && close(owned->session_fd) &&
+			!closed) {
+			closed = -1;
+			native_code = errno;
+		}
+		free(owned->session_path);
+	}
 	pg_builder_entry *entry = owned->entries;
 
 	while (entry) {
@@ -861,8 +900,20 @@ static pg_status pg_archive_builder_finish_coordinated(
 {
 	if (!builder || builder->finished)
 		return pg_result(PG_INVALID, error);
+	if (builder->visiting)
+		return pg_result(PG_REENTRANT, error);
 	if (builder->live_writers)
 		return pg_result(PG_BUSY, error);
+	if (builder->session_path) {
+		pg_status checkpointed =
+			pg_archive_builder_checkpoint(builder, error);
+
+		if (checkpointed != PG_OK) {
+			builder->finished = 1;
+			int native_code = error ? error->native_code : 0;
+			return pg_native_result(PG_IO, native_code, error);
+		}
+	}
 	int lease = -1, native_code = 0;
 	pg_status status = pg_native_target_lease(builder->native_path,
 		builder->target_exists, &lease, &native_code);
@@ -891,6 +942,9 @@ pg_status pg_archive_builder_finish(
 	pg_context_unlock(context);
 	return status;
 }
+
+/* Validate capacity before allocating destination resources. */
+
 pg_status pg_archive_builder_create_config(pg_context *context,
 	const char *path, const pg_archive_build_options *options,
 	pg_archive_builder **out, pg_error *error)

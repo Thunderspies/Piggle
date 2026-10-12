@@ -364,7 +364,8 @@ TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
 		ASSERT_EQ(pid, waitpid(pid, &status, 0));
 		ASSERT_TRUE(WIFEXITED(status));
 		ASSERT_EQ(0, WEXITSTATUS(status));
-		EXPECT_STATUS(pg_source_recover(context, "fold", &error), PG_OK);
+		EXPECT_STATUS(
+			pg_source_recover(context, "fold", &error), PG_OK);
 		EXPECT_STATUS(pg_source_open(context, "fold", NULL, &source,
 				&error), PG_OK);
 		EXPECT_STATUS(pg_source_validate(source, &error), PG_OK);
@@ -381,7 +382,8 @@ TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
 			mode == 15 ? PG_OK : PG_NOT_FOUND);
 		if (file) {
 			pg_file_info info;
-			EXPECT_STATUS(pg_file_inspect(file, &info, &error), PG_OK);
+			EXPECT_STATUS(
+				pg_file_inspect(file, &info, &error), PG_OK);
 			EXPECT_EQ(65536u, info.cached_header_size);
 			EXPECT_STATUS(pg_file_close(&file, &error), PG_OK);
 		}
@@ -675,7 +677,8 @@ TEST_F(ApiBuilder, CrossVolumePublication)
 
 #endif
 #ifdef __linux__
-static int exdev_publication(uint32_t flags, bool existing)
+static int exdev_publication(uint32_t flags, bool existing, bool session,
+	bool fail_copy = false)
 {
 	PG_CHECK(!directory("scratch"));
 	if (existing)
@@ -687,8 +690,12 @@ static int exdev_publication(uint32_t flags, bool existing)
 	pg_archive_build_options config = {
 		{PG_HOGG10, flags, 0}, "scratch", 0};
 	PG_STATUS(pg_context_open(&context, &error), PG_OK);
-	PG_STATUS(pg_archive_builder_create_config(context, "output",
-			&config, &builder, &error), PG_OK);
+	if (session)
+		PG_STATUS(pg_archive_builder_create_session(context, "output",
+				"session", &config, &builder, &error), PG_OK);
+	else
+		PG_STATUS(pg_archive_builder_create_config(context, "output",
+				&config, &builder, &error), PG_OK);
 	std::string bytes(131073, 'x');
 	pg_entry_options entry = {};
 	entry.compression = PG_COMPRESS_NEVER;
@@ -698,16 +705,28 @@ static int exdev_publication(uint32_t flags, bool existing)
 	PG_CHECK(!fstat(fileno(builder->staging), &staged));
 	PG_CHECK(!fstat(builder->parent_fd, &destination));
 	PG_CHECK(staged.st_dev == destination.st_dev);
-	pg_test_journal_fault(17);
+	pg_test_journal_fault(fail_copy ? 18 : 17);
 	pg_status status = pg_archive_builder_finish(builder, &error);
 	pg_test_journal_fault(0);
-	PG_CHECK(status == PG_OK && error.native_code == 0);
-	PG_CHECK(!stat("output", &destination));
-	PG_CHECK(staged.st_ino != destination.st_ino);
-	PG_CHECK((uint64_t)destination.st_size ==
-		builder->whole_archive_copied_bytes);
+	if (fail_copy) {
+		PG_CHECK(status == PG_IO && error.native_code == EIO);
+		PG_CHECK(!expect_bytes("output", "old", 3));
+	} else {
+		PG_CHECK(status == PG_OK && error.native_code == 0);
+		PG_CHECK(!stat("output", &destination));
+		PG_CHECK(staged.st_ino != destination.st_ino);
+		PG_CHECK((uint64_t)destination.st_size ==
+			builder->whole_archive_copied_bytes);
+	}
 	PG_CHECK(std::filesystem::exists(builder->staging_path));
 	PG_STATUS(pg_archive_builder_close(&builder, &error), PG_OK);
+	if (session) {
+		PG_STATUS(pg_archive_builder_resume(
+				context, "session", &builder, &error), PG_OK);
+		PG_STATUS(pg_archive_builder_finish(builder, &error),
+			fail_copy ? PG_OK : PG_INVALID);
+		PG_STATUS(pg_archive_builder_discard(&builder, &error), PG_OK);
+	}
 	PG_STATUS(pg_source_open(context, "output", NULL, &source, &error),
 		PG_OK);
 	PG_STATUS(pg_source_validate(source, &error), PG_OK);
@@ -729,17 +748,32 @@ static int exdev_publication(uint32_t flags, bool existing)
 
 TEST_F(ApiBuilder, ExdevLinkPublication)
 {
-	ASSERT_EQ(0, exdev_publication(0, false));
+	ASSERT_EQ(0, exdev_publication(0, false, false));
 }
 
 TEST_F(ApiBuilder, ExdevRenamePublication)
 {
-	ASSERT_EQ(0, exdev_publication(PG_OVERWRITE, true));
+	ASSERT_EQ(0, exdev_publication(PG_OVERWRITE, true, false));
 }
 
 TEST_F(ApiBuilder, ExdevRenameWithoutExistingDestination)
 {
-	ASSERT_EQ(0, exdev_publication(PG_OVERWRITE, false));
+	ASSERT_EQ(0, exdev_publication(PG_OVERWRITE, false, false));
+}
+
+TEST_F(ApiBuilder, ExdevLinkSessionPublication)
+{
+	ASSERT_EQ(0, exdev_publication(0, false, true));
+}
+
+TEST_F(ApiBuilder, ExdevRenameSessionPublication)
+{
+	ASSERT_EQ(0, exdev_publication(PG_OVERWRITE, true, true));
+}
+
+TEST_F(ApiBuilder, ExdevCopyFailurePreservesCheckpoint)
+{
+	ASSERT_EQ(0, exdev_publication(PG_OVERWRITE, true, true, true));
 }
 
 TEST_F(ApiBuilder, LowSpaceLeavesNamesAvailable)
@@ -785,7 +819,8 @@ TEST_F(ApiBuilder, LowSpaceLeavesNamesAvailable)
 TEST_F(ApiBuilder, UnwritableStagingDirectory)
 {
 	if (!geteuid())
-		GTEST_SKIP() << "Permission denial requires an unprivileged user";
+		GTEST_SKIP()
+			<< "Permission denial requires an unprivileged user";
 	ASSERT_EQ(0, directory("blocked"));
 	ASSERT_EQ(0, chmod("blocked", 0000));
 	pg_context *context = NULL;
@@ -793,9 +828,11 @@ TEST_F(ApiBuilder, UnwritableStagingDirectory)
 	pg_error error;
 	EXPECT_STATUS(pg_context_open(&context, &error), PG_OK);
 	for (uint32_t format : {PG_PIGG2, PG_HOGG10}) {
-		pg_archive_build_options config = {{format, 0, 0}, "blocked", 0};
-		EXPECT_STATUS(pg_archive_builder_create_config(context, "archive",
-				&config, &builder, &error), PG_IO);
+		pg_archive_build_options config = {
+			{format, 0, 0}, "blocked", 0};
+		EXPECT_STATUS(pg_archive_builder_create_config(context,
+				"archive", &config, &builder, &error),
+			PG_IO);
 		EXPECT_EQ(nullptr, builder);
 	}
 	EXPECT_STATUS(pg_context_close(&context, &error), PG_OK);

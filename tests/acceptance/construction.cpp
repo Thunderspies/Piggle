@@ -8,6 +8,15 @@ World &world()
 	return *scope;
 }
 
+static pg_status PG_CALL capture_inventory(
+	void *state, const pg_file_info *entry)
+{
+	auto *names = static_cast<std::vector<std::string> *>(state);
+
+	names->push_back(entry->original_name);
+	return PG_OK;
+}
+
 GIVEN("^a HOGG was created with room for 31 user entries$")
 {
 	World &w = world();
@@ -168,6 +177,154 @@ THEN("^the original archive remains byte-for-byte unchanged$")
 	World &w = world();
 
 	EXPECT_EQ(read_native(w.paths["storage"]), w.previous);
+}
+
+GIVEN("^a persistent HOGG builder uses a chosen staging directory$")
+{
+	World &w = world();
+
+	std::filesystem::create_directory("scratch");
+	pg_archive_build_options options = {{PG_HOGG10, 0, 0}, "scratch", 32};
+
+	expect_status(
+		pg_archive_builder_create_session(w.context, "published.hogg",
+			"session", &options, &w.builder, &w.error),
+		PG_OK, w.error);
+}
+
+WHEN("^I checkpoint one entry and close after adding another entry$")
+{
+	World &w = world();
+
+	expect_status(pg_archive_builder_write_all(
+			w.builder, "First", "abc", 3, nullptr, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_archive_builder_checkpoint(w.builder, &w.error), PG_OK,
+		w.error);
+	expect_status(pg_archive_builder_write_all(
+			w.builder, "Ignored", "x", 1, nullptr, &w.error),
+		PG_OK, w.error);
+	expect_status(
+		pg_archive_builder_close(&w.builder, &w.error), PG_OK, w.error);
+}
+
+WHEN("^I add two entries and suspend construction$")
+{
+	World &w = world();
+
+	expect_status(pg_archive_builder_write_all(
+			w.builder, "First", "abc", 3, nullptr, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_archive_builder_write_all(
+			w.builder, "Second", "def", 3, nullptr, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_archive_builder_suspend(&w.builder, &w.error), PG_OK,
+		w.error);
+}
+
+WHEN("^I resume the construction session$")
+{
+	World &w = world();
+
+	expect_status(pg_archive_builder_resume(
+			w.context, "session", &w.builder, &w.error),
+		PG_OK, w.error);
+}
+
+THEN("^its inventory contains only the checkpointed entry$")
+{
+	World &w = world();
+
+	expect_status(pg_archive_builder_visit_inventory(
+			w.builder, capture_inventory, &w.names, &w.error),
+		PG_OK, w.error);
+	EXPECT_EQ(w.names, (std::vector<std::string>{"First"}));
+}
+
+THEN("^its inventory retains both entries in insertion order$")
+{
+	World &w = world();
+
+	expect_status(pg_archive_builder_visit_inventory(
+			w.builder, capture_inventory, &w.names, &w.error),
+		PG_OK, w.error);
+	EXPECT_EQ(w.names, (std::vector<std::string>{"First", "Second"}));
+}
+
+THEN("^I can add another entry and explicitly publish the archive$")
+{
+	World &w = world();
+
+	expect_status(pg_archive_builder_write_all(
+			w.builder, "Second", "def", 3, nullptr, &w.error),
+		PG_OK, w.error);
+	expect_status(
+		pg_archive_builder_finish(w.builder, &w.error), PG_OK, w.error);
+	expect_status(
+		pg_archive_builder_close(&w.builder, &w.error), PG_OK, w.error);
+	pg_source *source = nullptr;
+
+	expect_status(pg_source_open(w.context, "published.hogg", nullptr,
+			&source, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_source_validate(source, &w.error), PG_OK, w.error);
+	expect_status(pg_source_close(&source, &w.error), PG_OK, w.error);
+}
+
+THEN("^I can discard construction without publishing an archive$")
+{
+	World &w = world();
+
+	expect_status(pg_archive_builder_discard(&w.builder, &w.error), PG_OK,
+		w.error);
+	EXPECT_FALSE(std::filesystem::exists("published.hogg"));
+	EXPECT_FALSE(std::filesystem::exists("session"));
+}
+
+WHEN("^I copy its checkpoint into another session directory$")
+{
+	World &w = world();
+
+	expect_status(pg_archive_builder_write_all(
+			w.builder, "First", "abc", 3, nullptr, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_archive_builder_checkpoint(w.builder, &w.error), PG_OK,
+		w.error);
+	std::filesystem::create_directory("copy");
+	std::filesystem::copy_file("session/checkpoint", "copy/checkpoint");
+	write_native("copy/lock", "");
+}
+
+THEN("^resuming the copy reports busy without acquiring a builder$")
+{
+	World &w = world();
+	pg_archive_builder *other = nullptr;
+
+	w.status = pg_archive_builder_resume(
+		w.context, "copy", &other, &w.error);
+	expect_status(w.status, PG_BUSY, w.error);
+	EXPECT_EQ(nullptr, other);
+	pg_archive_builder_close(&other, nullptr);
+}
+
+THEN("^the original builder can publish its checkpointed content$")
+{
+	World &w = world();
+
+	expect_status(
+		pg_archive_builder_finish(w.builder, &w.error), PG_OK, w.error);
+	expect_status(pg_archive_builder_discard(&w.builder, &w.error), PG_OK,
+		w.error);
+	expect_status(pg_source_open(w.context, "published.hogg", nullptr,
+			&w.sources["published"], &w.error),
+		PG_OK, w.error);
+	char bytes[3];
+	size_t count;
+
+	expect_status(pg_source_read_all(w.sources["published"], "First",
+			bytes, sizeof(bytes), &count, &w.error),
+		PG_OK, w.error);
+	EXPECT_EQ("abc", std::string(bytes, count));
 }
 
 } // namespace

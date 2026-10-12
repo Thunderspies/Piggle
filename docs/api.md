@@ -799,3 +799,66 @@ domain. Values unrepresentable in HOGG return `PG_LIMIT`. NULL construction
 options inherit the source checksum and scratch policy. Explicit options must
 select HOGG and the same checksum domain. Source/destination aliases are rejected.
 The source remains intact; the caller opens or activates the result.
+
+## Persistent HOGG construction
+
+`pg_archive_builder_create_session` creates a new exclusive session directory
+and commits an empty checkpoint. Its construction options and destination
+identity are saved, and its payload file follows the chosen scratch policy.
+Only HOGG sessions are supported. Session and payload leases exclude competing
+owners. `pg_archive_builder_resume` acquires the lease, restores the last selected
+metadata image idempotently, and rereads and decodes checkpointed payloads before
+returning a usable builder. Metadata corruption returns `PG_CORRUPT`, changed
+native objects return `PG_STALE`, and payload corruption can return `PG_CHECKSUM`.
+Uncheckpointed and incomplete entries are omitted from the restored inventory.
+
+`pg_archive_builder_checkpoint` flushes payloads and a complete next metadata
+image before atomically selecting it. Checkpoints can traverse metadata and
+payloads. Failed selection retains the previous checkpoint. `PG_COMMITTED`
+describes a selected checkpoint with a later durability or cleanup failure;
+it does not imply publication of the destination archive.
+
+| Operation | Ordinary builder | Persistent builder |
+| --- | --- | --- |
+| `finish` | Explicit publication, then close-only | Checkpoint and explicit publication, then close-only |
+| `close` | Abort unfinished private entries | Retain the last selected checkpoint |
+| `checkpoint` | `PG_INVALID` | Save completed entries; live writer returns `PG_BUSY` |
+| `suspend` | `PG_INVALID` | Checkpoint and close; live writer returns `PG_BUSY` |
+| `discard` | `PG_INVALID` | Remove session/private files and consume ownership |
+
+Inventory visitation works for both builder kinds, visits completed entries in
+insertion order and supplies borrowed `pg_file_info` spans plus explicit caller
+state. Identity/generation fields are zero and `archive_record` is the insertion
+ordinal. Copy any spans that must survive the callback. A non-OK callback status
+stops visitation. Reentrant mutation or close returns `PG_REENTRANT`.
+
+Final publication records intent and the completed output's native identity.
+Resume detects an already published output and returns a close-only builder;
+it never publishes automatically. Discard removes private construction data and
+never removes published output. A renamed/replaced session directory is stale;
+discard rejects it without consuming the handle. Explicit finish and cleanup
+follow the same separation illustrated by
+[libzip's commit-write operation](https://libzip.org/documentation/zip_source_commit_write/).
+
+```c
+pg_archive_build_options options = {{PG_HOGG10, 0, PG_CHECKSUM_LOGICAL},
+	"scratch", 10000};
+pg_archive_builder *builder = NULL;
+pg_error error;
+pg_status status = pg_archive_builder_create_session(context, "new.hogg",
+	"construction", &options, &builder, &error);
+if (status == PG_OK)
+	status = pg_archive_builder_write_all(builder, "Data/File.bin", data,
+		size, NULL, &error);
+if (status == PG_OK)
+	status = pg_archive_builder_suspend(&builder, &error);
+/* Later: resume, visit inventory, add remaining entries, finish, close.
+ * Use discard when abandoning a successfully acquired session.
+ */
+pg_archive_builder_close(&builder, NULL);
+```
+
+Process-interruption tests exercise boundaries before/after checkpoint
+selection and after publication. They do not establish power-loss guarantees
+for hardware or filesystems that ignore durability requests. Partial entry
+streams and compressor-state resumption are outside this API.

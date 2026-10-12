@@ -20,7 +20,20 @@ int piggle_c11_contract(void)
 			PG_INVALID ||
 		storage.physical_length ||
 		pg_source_compact(NULL, "invalid", NULL, &contract_error) !=
-			PG_INVALID)
+			PG_INVALID ||
+		pg_archive_builder_create_session(NULL, "invalid", "invalid",
+			&options, &builder, &contract_error) != PG_INVALID ||
+		builder ||
+		pg_archive_builder_resume(NULL, "invalid", &builder,
+			&contract_error) != PG_INVALID ||
+		builder ||
+		pg_archive_builder_checkpoint(NULL, &contract_error) !=
+			PG_INVALID ||
+		pg_archive_builder_suspend(NULL, &contract_error) !=
+			PG_INVALID ||
+		pg_archive_builder_visit_inventory(
+			NULL, NULL, NULL, &contract_error) != PG_INVALID ||
+		pg_archive_builder_discard(NULL, &contract_error) != PG_INVALID)
 		return 1;
 	pg_context *context = NULL;
 	pg_error error;
