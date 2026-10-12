@@ -547,6 +547,11 @@ struct pg_archive_builder {
 	char *leaf;
 	int parent_fd;
 	FILE *staging;
+	char *staging_directory;
+	char *staging_path;
+	int staging_parent_fd;
+	char *staging_leaf;
+	uint64_t hogg_user_capacity;
 	pg_builder_entry *entries;
 	pg_builder_entry *entries_tail;
 	pg_builder_entry *name_index;
@@ -669,5 +674,9 @@ static inline const char *pg_native_basename(const char *path)
 
 char *pg_native_absolute(const char *path, pg_status *status,
 		int *native_code);
+
+pg_status pg_staging_resolve(const char *directory, char **out,
+	int *native_code);
+FILE *pg_staging_open(const char *directory, char **named_path);
 
 #endif

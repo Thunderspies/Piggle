@@ -7,6 +7,8 @@ namespace piggle
 {
 using ::PG_CHECKSUM_LOGICAL;
 using ::PG_CHECKSUM_STORED;
+using ::pg_archive_build_options;
+using archive_build_options = ::pg_archive_build_options;
 using ::pg_archive_options;
 using archive_options = ::pg_archive_options;
 using ::pg_archive_builder;
