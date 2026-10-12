@@ -730,3 +730,12 @@ entries retain insertion order. Metadata is allocated before opening a writer;
 failed validation or cleanup leaves the name available and earlier entries
 usable. Entry insertion performs O(log N) comparisons and constant-time ordered
 append. Final metadata assembly still traverses completed entries.
+
+## Large cached headers
+
+Large cached headers use a replacement base DataList when their actions cannot
+fit the existing journal reservation. The replacement includes effective journal
+contents and pending values under fresh IDs. Existing references remain valid
+while the replacement record is published and folded actions are cleared.
+Compressed DataLists are republished with matching encoding metadata. The user
+record is published last; unrelated entries remain valid at each boundary.
