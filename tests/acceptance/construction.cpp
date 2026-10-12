@@ -119,4 +119,55 @@ THEN("^the edited entry retains its payload and the complete cached header$")
 	EXPECT_EQ(std::string(bytes, count), "abc");
 }
 
+GIVEN("^a HOGG contains obsolete payload bytes after replacement$")
+{
+	World &w = world();
+
+	w.archive("storage", {{"a", "original"}}, PG_HOGG10);
+	w.active = "storage";
+	expect_status(pg_source_write_all(
+			w.source(), "a", "latest", 6, nullptr, &w.error),
+		PG_OK, w.error);
+	w.previous = read_native(w.paths[w.active]);
+}
+
+WHEN("^I inspect its storage and compact it to another archive$")
+{
+	World &w = world();
+	pg_source_storage_info info;
+
+	expect_status(pg_source_storage_inspect(w.source(), &info, &w.error),
+		PG_OK, w.error);
+	EXPECT_GE(info.unreferenced_bytes, 8u);
+	EXPECT_EQ(info.physical_length,
+		info.live_payload_bytes + info.metadata_bytes +
+			info.unreferenced_bytes);
+	expect_status(pg_source_compact(
+			w.source(), "compact.hogg", nullptr, &w.error),
+		PG_OK, w.error);
+	w.paths["compact"] = "compact.hogg";
+	expect_status(pg_source_open(w.context, "compact.hogg", nullptr,
+			&w.sources["compact"], &w.error),
+		PG_OK, w.error);
+}
+
+THEN("^the compacted archive matches the visible source content$")
+{
+	World &w = world();
+	char bytes[16];
+	size_t count;
+
+	expect_status(pg_source_read_all(w.sources["compact"], "a", bytes,
+			sizeof(bytes), &count, &w.error),
+		PG_OK, w.error);
+	EXPECT_EQ(std::string(bytes, count), "latest");
+}
+
+THEN("^the original archive remains byte-for-byte unchanged$")
+{
+	World &w = world();
+
+	EXPECT_EQ(read_native(w.paths["storage"]), w.previous);
+}
+
 } // namespace

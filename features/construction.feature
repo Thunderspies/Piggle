@@ -13,3 +13,10 @@ Feature: Build and maintain archives with explicit publication
     Then the unchanged reader still returns its original bytes
     And the edited entry retains its payload and the complete cached header
 
+  @BUILD-003
+  Scenario: Compaction preserves the source and its visible content
+    Given a HOGG contains obsolete payload bytes after replacement
+    When I inspect its storage and compact it to another archive
+    Then the compacted archive matches the visible source content
+    And the original archive remains byte-for-byte unchanged
+

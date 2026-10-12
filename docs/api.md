@@ -778,3 +778,24 @@ reservation. It publishes that file directly on the destination filesystem.
 Across filesystems it copies once into a destination-side temporary archive,
 then atomically publishes it. PIGG retains its assembly path. Pack and compaction
 reserve their captured inventory count before transferring payloads.
+
+## Storage inspection and compaction
+
+`pg_source_storage_inspect` revalidates the native identity before and after
+accounting for indexed archive state. External changes return `PG_STALE` until
+an explicit rescan. It reports 64-bit file length, unique active payload ranges,
+metadata/reserve ranges and unreferenced ranges. Hidden and unnamed active
+records contribute to physical accounting. Shared ranges are counted once;
+overlaps with internal metadata are assigned to the live payload category.
+Lengths count offset ranges, including sparse holes, rather than filesystem
+allocation blocks.
+
+The compacted-size estimate describes a default HOGG containing source-visible
+winners, including their original spelling, stored encoding and cached headers.
+Reclaimable bytes are the nonnegative difference between current and estimated
+length. `pg_source_compact` builds a separate HOGG with validated transfers,
+preserving spelling, timestamps, headers, supported encodings and checksum
+domain. Values unrepresentable in HOGG return `PG_LIMIT`. NULL construction
+options inherit the source checksum and scratch policy. Explicit options must
+select HOGG and the same checksum domain. Source/destination aliases are rejected.
+The source remains intact; the caller opens or activates the result.
