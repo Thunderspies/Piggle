@@ -1,5 +1,5 @@
 # The upstream cucumber-cpp library supplies the native wire-server main.
-add_executable(acceptance_steps world.cpp names.cpp view.cpp entries.cpp
+add_executable(acceptance_steps construction.cpp world.cpp names.cpp view.cpp entries.cpp
 	discovery.cpp handles.cpp watch.cpp work.cpp edit.cpp io.cpp)
 target_link_libraries(acceptance_steps PRIVATE cucumber-cpp test_support
 	zlib-ng::zlib Threads::Threads)

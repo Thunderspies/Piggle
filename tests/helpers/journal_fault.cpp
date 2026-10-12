@@ -13,6 +13,7 @@ static int marker_cleared;
 static off_t marker_offset;
 static int unlinked;
 static int replaced;
+static unsigned marker_count;
 
 extern "C" void pg_test_journal_fault(int mode)
 {
@@ -22,6 +23,7 @@ extern "C" void pg_test_journal_fault(int mode)
 	marker_offset = 0;
 	unlinked = 0;
 	replaced = 0;
+	marker_count = 0;
 }
 
 extern "C" ssize_t pwrite64(
@@ -44,6 +46,7 @@ extern "C" ssize_t pwrite64(
 		if (marker) {
 			marker_written = 1;
 			marker_offset = offset;
+			marker_count++;
 		} else if (marker_written && offset == marker_offset) {
 			marker_cleared = 1;
 		}
@@ -59,6 +62,13 @@ extern "C" ssize_t pwrite(
 
 extern "C" int fsync(int fd)
 {
+	if (fault_mode >= 13 && fault_mode <= 15 && marker_written &&
+		marker_count == (unsigned)(fault_mode - 12)) {
+		if (syscall(SYS_fsync, fd))
+			_exit(2);
+		_exit(0);
+	}
+
 	if ((fault_mode == 2 && marker_written) ||
 		(fault_mode == 4 && marker_cleared) ||
 		(fault_mode == 6 && replaced)) {
