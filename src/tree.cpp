@@ -1544,6 +1544,7 @@ void pg_tree_sources_restore(pg_tree *tree, pg_tree_source_state *saved)
 			continue;
 		pg_source_lock(source);
 		pg_source_index_clear(source);
+		pg_source_hogg_cache_clear(source);
 		pg_source_record **at = &source->records;
 
 		while (*at) {

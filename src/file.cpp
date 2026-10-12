@@ -283,13 +283,12 @@ static pg_status pg_file_verify_locked(pg_file *file, pg_error *error)
 	if (file->source->format == PG_HOGG10) {
 		pg_source_record *record;
 
-		for (record = file->source->records; record;
-			record = record->next)
-			if (record->info.copy_id ==
-					file->info.copy_id &&
-				record->info.copy_generation ==
-					file->info.copy_generation)
-				break;
+		record = pg_source_copy_record(file->source,
+			file->info.archive_record, file->info.copy_id);
+		if (record &&
+			record->info.copy_generation !=
+				file->info.copy_generation)
+			record = NULL;
 		if (!record)
 			return pg_result(PG_STALE, error);
 		offset = record->payload_offset;

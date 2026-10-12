@@ -207,12 +207,9 @@ static pg_status pg_reader_native_check(
 
 		if (source->recovery_required)
 			return PG_RECOVERY_REQUIRED;
-		for (record = source->records; record;
-			record = record->next) {
-			if (record->info.copy_id ==
-				reader->file_info.copy_id)
-				break;
-		}
+		record = pg_source_copy_record(source,
+			reader->file_info.archive_record,
+			reader->file_info.copy_id);
 		if (!record ||
 			record->info.copy_generation !=
 				reader->file_info.copy_generation)
@@ -1121,22 +1118,13 @@ static pg_status pg_reader_open_locked(pg_file *file,
 		pg_context_child_drop((*out)->context);
 		return pg_result(PG_OK, error);
 	}
-	int found_copy = 0;
-	uint64_t payload_offset = file->payload_offset;
-	for (pg_source_record *record = file->source->records; record;
-		record = record->next) {
-		if (record->info.copy_id == file->info.copy_id) {
-			found_copy = 1;
-			payload_offset = record->payload_offset;
-			if (record->info.copy_generation !=
-				file->info.copy_generation)
-				return pg_result(PG_STALE, error);
-		}
-	}
-	if (!found_copy)
+	pg_source_record *record = pg_source_copy_record(
+		file->source, file->info.archive_record, file->info.copy_id);
+	if (!record ||
+		record->info.copy_generation != file->info.copy_generation)
 		return pg_result(PG_STALE, error);
-	fd = open(file->source->native_path,
-		O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	uint64_t payload_offset = record->payload_offset;
+	fd = open(file->source->native_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
 	if (fd < 0) {
 		native_code = errno;
 		return pg_native_result(PG_IO, native_code, error);
@@ -1599,11 +1587,10 @@ static pg_status pg_writer_open_archive_source(pg_source *source,
 	}
 	effective = *options;
 	if (!selection) {
-		for (pg_source_record *item = source->records; item;
-			item = item->next) {
-			if (!strcmp(item->info.canonical_name,
-					canonical))
-				record = item;
+		status = pg_source_record_find(source, canonical, &record);
+		if (status != PG_OK) {
+			free(canonical);
+			return pg_result(status, error);
 		}
 	}
 	if (record && options->entry.original_name) {
