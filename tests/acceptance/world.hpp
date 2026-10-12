@@ -55,8 +55,14 @@ inline void replace_native(
 {
 	write_native(path + ".replacement", bytes);
 #ifdef _WIN32
-	EXPECT_TRUE(MoveFileExA((path + ".replacement").c_str(),
-		path.c_str(), MOVEFILE_REPLACE_EXISTING));
+	BOOL replaced = MoveFileExA((path + ".replacement").c_str(),
+		path.c_str(), MOVEFILE_REPLACE_EXISTING);
+
+	if (!replaced && GetLastError() == ERROR_ACCESS_DENIED)
+		replaced = ReplaceFileA(path.c_str(),
+			(path + ".replacement").c_str(), nullptr,
+			REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr);
+	EXPECT_TRUE(replaced) << GetLastError();
 #else
 	EXPECT_EQ(0,
 		rename((path + ".replacement").c_str(), path.c_str()));
