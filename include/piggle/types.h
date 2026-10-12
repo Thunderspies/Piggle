@@ -186,6 +186,19 @@ typedef struct pg_archive_options {
 	uint32_t checksum_domain;
 } pg_archive_options;
 
+/* Construction policy. Zero-init except archive.format selects defaults.
+ * archive retains the existing format/flags/checksum profile. Optional
+ * staging_directory is copied and resolved before create returns; NULL uses
+ * library defaults. hogg_user_capacity excludes the internal DataList.
+ * Physical capacity is max(16, completed entries + 1, requested + 1).
+ * Requests never limit construction; nonzero capacity on PIGG is UNSUPPORTED.
+ */
+typedef struct pg_archive_build_options {
+	pg_archive_options archive;
+	const char *staging_directory;
+	uint64_t hogg_user_capacity;
+} pg_archive_build_options;
+
 /* Reader metadata: size counts bytes exposed by this representation.
  * Native readers are LOGICAL, with size==logical_size and native mtime.
  */

@@ -750,3 +750,21 @@ is bounded by O(N log N). The canonical source array still shifts a suffix of
 pointers for insertion or deletion. DataList folding, table growth, source
 listings and tree observation snapshots can traverse metadata; these are not
 ordinary replacement work.
+
+## Archive construction capacity
+
+`pg_archive_builder_create_config` accepts `pg_archive_build_options` without
+changing existing option structs or creation entry points. Its archive profile
+has the same format, overwrite, and checksum rules as `create_options`.
+`hogg_user_capacity` reserves user entries and excludes the internal DataList;
+physical file and EA capacity is `max(16, entries + 1, request + 1)`. Zero keeps
+the default, and a smaller request never limits construction. Nonzero capacity
+on PIGG returns `PG_UNSUPPORTED`; overflowing capacities return `PG_LIMIT`.
+The journals remain 1,024 and 3,096 bytes, and archives remain HOGG v10.
+
+## Scratch storage and private HOGG publication
+
+`pg_archive_build_options.staging_directory` is optional. Creation copies and
+resolves it before returning; it must name an existing directory. The default
+builder directory is the destination's parent. Entry input and compression
+scratch inherit the builder policy.

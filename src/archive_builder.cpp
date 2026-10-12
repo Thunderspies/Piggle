@@ -271,9 +271,9 @@ extern "C" {
 /* Validate format, flags and exclusive native destination. */
 /* Create private staging and builder index; publish handle on success.
  */
-PG_API pg_status PG_CALL pg_archive_builder_create(pg_context *context,
-	const char *native_path, uint32_t format, uint32_t flags,
-	pg_archive_builder **out, pg_error *error)
+static pg_status pg_builder_create(pg_context *context, const char *native_path,
+	uint32_t format, uint32_t flags, const char *staging_directory,
+	uint64_t capacity, pg_archive_builder **out, pg_error *error)
 {
 	pg_context_lock(context);
 	auto coordinated = [&]() -> pg_status {
@@ -297,6 +297,7 @@ PG_API pg_status PG_CALL pg_archive_builder_create(pg_context *context,
 			1, sizeof(*builder));
 		if (!builder)
 			return pg_result(PG_NOMEM, error);
+		builder->staging_parent_fd = -1;
 		builder->native_path = pg_native_absolute(
 			native_path, &path_status, &native_code);
 		if (!builder->native_path) {
@@ -333,12 +334,37 @@ PG_API pg_status PG_CALL pg_archive_builder_create(pg_context *context,
 			&target, target_exists, NULL, &native_code);
 		if (status != PG_OK)
 			goto cleanup_parent;
-		builder->staging = tmpfile();
+		builder->staging_parent_fd = -1;
+		builder->hogg_user_capacity = capacity;
+		if (staging_directory) {
+			status = pg_staging_resolve(staging_directory,
+				&builder->staging_directory, &native_code);
+		} else {
+			size_t length = strlen(builder->native_path) -
+				strlen(builder->leaf);
+			builder->staging_directory = (char *)malloc(length + 1);
+			if (!builder->staging_directory)
+				status = PG_NOMEM;
+			else {
+				memcpy(builder->staging_directory,
+					builder->native_path, length);
+				builder->staging_directory[length] = 0;
+			}
+		}
+		if (status != PG_OK)
+			goto cleanup_parent;
+		builder->staging = pg_staging_open(
+			builder->staging_directory, &builder->staging_path);
 		if (!builder->staging) {
 			native_code = errno;
 			status = PG_IO;
 			goto cleanup_parent;
 		}
+		status = pg_native_parent_open(builder->staging_path, 0,
+			&builder->staging_parent_fd, &builder->staging_leaf,
+			&native_code);
+		if (status != PG_OK)
+			goto cleanup_parent;
 		builder->context = context;
 		builder->format = format;
 		builder->flags = flags;
@@ -350,6 +376,15 @@ PG_API pg_status PG_CALL pg_archive_builder_create(pg_context *context,
 		return pg_result(PG_OK, error);
 
 	cleanup_parent:
+		if (builder->staging)
+			fclose(builder->staging);
+		if (builder->staging_parent_fd >= 0)
+			close(builder->staging_parent_fd);
+		if (builder->staging_path)
+			unlink(builder->staging_path);
+		free(builder->staging_directory);
+		free(builder->staging_path);
+		free(builder->staging_leaf);
 		close(builder->parent_fd);
 		free(builder->leaf);
 		free(builder->native_path);
@@ -661,12 +696,44 @@ PG_API pg_status PG_CALL pg_archive_builder_close(
 	if (owned->live_writers)
 		return pg_result(PG_BUSY, error);
 	*builder = NULL;
-	closed = fclose(owned->staging);
+	struct stat staged = {};
+	int staged_identity = owned->staging
+		? fstat(fileno(owned->staging), &staged) == 0
+		: 0;
+	closed = owned->staging ? fclose(owned->staging) : 0;
 	native_code = closed ? errno : 0;
 	if (close(owned->parent_fd) && !closed) {
 		closed = -1;
 		native_code = errno;
 	}
+	if (owned->staging_path) {
+		struct stat named;
+		int removed = 0;
+
+		if (fstatat(owned->staging_parent_fd, owned->staging_leaf,
+			&named, AT_SYMLINK_NOFOLLOW)) {
+			if (errno != ENOENT)
+				removed = -1;
+		} else if (!staged_identity || staged.st_dev != named.st_dev ||
+			staged.st_ino != named.st_ino) {
+			removed = -1;
+			errno = EIO;
+		} else
+			removed = unlinkat(owned->staging_parent_fd,
+				owned->staging_leaf, 0);
+		if (removed && !closed) {
+			closed = -1;
+			native_code = errno;
+		}
+	}
+	if (owned->staging_parent_fd >= 0 && close(owned->staging_parent_fd) &&
+		!closed) {
+		closed = -1;
+		native_code = errno;
+	}
+	free(owned->staging_directory);
+	free(owned->staging_path);
+	free(owned->staging_leaf);
 	pg_builder_entry *entry = owned->entries;
 
 	while (entry) {
@@ -701,8 +768,9 @@ pg_status pg_archive_builder_create_options(pg_context *context,
 	if (options->checksum_domain == PG_CHECKSUM_STORED &&
 		options->format != PG_HOGG10)
 		return pg_result(PG_UNSUPPORTED, error);
-	pg_status status = pg_archive_builder_create(context, path,
-		options->format, options->flags, out, error);
+	pg_archive_build_options config = {*options, NULL, 0};
+	pg_status status = pg_archive_builder_create_config(
+		context, path, &config, out, error);
 
 	if (status == PG_OK)
 		(*out)->checksum_domain = options->checksum_domain;
@@ -743,4 +811,38 @@ pg_status pg_archive_builder_finish(
 
 	pg_context_unlock(context);
 	return status;
+}
+pg_status pg_archive_builder_create_config(pg_context *context,
+	const char *path, const pg_archive_build_options *options,
+	pg_archive_builder **out, pg_error *error)
+{
+	if (out)
+		*out = NULL;
+	if (!out || !options ||
+		options->archive.checksum_domain > PG_CHECKSUM_STORED)
+		return pg_result(PG_INVALID, error);
+	if ((options->hogg_user_capacity ||
+		options->archive.checksum_domain == PG_CHECKSUM_STORED) &&
+		options->archive.format == PG_PIGG2)
+		return pg_result(PG_UNSUPPORTED, error);
+	if (options->hogg_user_capacity >= UINT32_MAX / 48)
+		return pg_result(PG_LIMIT, error);
+	pg_status status =
+		pg_builder_create(context, path, options->archive.format,
+			options->archive.flags, options->staging_directory,
+			options->hogg_user_capacity, out, error);
+
+	if (status == PG_OK)
+		(*out)->checksum_domain = options->archive.checksum_domain;
+	return status;
+}
+
+pg_status pg_archive_builder_create(pg_context *context, const char *path,
+	uint32_t format, uint32_t flags, pg_archive_builder **out,
+	pg_error *error)
+{
+	pg_archive_build_options options = {{format, flags, 0}, NULL, 0};
+
+	return pg_archive_builder_create_config(
+		context, path, &options, out, error);
 }

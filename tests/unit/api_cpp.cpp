@@ -10,6 +10,7 @@ namespace {
 
 CHECK_IMPORT(pg_archive_builder_create);
 CHECK_IMPORT(pg_archive_builder_create_options);
+CHECK_IMPORT(pg_archive_builder_create_config);
 CHECK_IMPORT(pg_archive_builder_write_all);
 CHECK_IMPORT(pg_archive_builder_import);
 CHECK_IMPORT(pg_archive_builder_copy);

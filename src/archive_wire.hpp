@@ -235,6 +235,10 @@ static inline pg_status pg_hogg_measure(pg_archive_builder *builder,
 		payloads += entry->stored_size;
 	}
 	capacity = users + 1 < 16 ? 16 : users + 1;
+	if (builder->hogg_user_capacity == UINT64_MAX)
+		return PG_LIMIT;
+	if (capacity < builder->hogg_user_capacity + 1)
+		capacity = builder->hogg_user_capacity + 1;
 	if (slots > UINT32_MAX || capacity > UINT32_MAX / 48 ||
 		4144 + 48 * capacity > INT64_MAX - payloads ||
 		data_size > INT64_MAX - (4144 + 48 * capacity + payloads))

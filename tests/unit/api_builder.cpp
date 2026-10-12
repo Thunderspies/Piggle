@@ -388,4 +388,81 @@ TEST_F(ApiBuilder, FailedTreeRefreshDropsMutationCache)
 	EXPECT_STATUS(pg_context_close(&context, &error), PG_OK);
 }
 
+
+TEST_F(ApiBuilder, Capacity)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *source = NULL;
+	pg_error error;
+	pg_archive_build_options options = {
+		{PG_HOGG10, 0, PG_CHECKSUM_LOGICAL}, NULL, 31};
+
+	EXPECT_STATUS(pg_context_open(&context, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_create_config(
+			context, "reserved", &options, &builder, &error),
+		PG_OK);
+	EXPECT_STATUS(pg_archive_builder_finish(builder, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_close(&builder, &error), PG_OK);
+	FILE *disk = fopen("reserved", "rb");
+	ASSERT_NE(nullptr, disk);
+	unsigned char bytes[24];
+	ASSERT_EQ(sizeof(bytes), fread(bytes, 1, sizeof(bytes), disk));
+	EXPECT_EQ(0, fclose(disk));
+	EXPECT_EQ(0, bytes[8]);
+	EXPECT_EQ(4, bytes[9]);
+	EXPECT_EQ(0, bytes[12]);
+	EXPECT_EQ(2, bytes[13]);
+	pg_source_options writable = {PG_HOGG10, PG_WRITE, PG_CHECKSUM_LOGICAL};
+	EXPECT_STATUS(
+		pg_source_open(context, "reserved", &writable, &source, &error),
+		PG_OK);
+	for (unsigned i = 0; i < 40; i++) {
+		char name[32];
+		snprintf(name, sizeof(name), "file%u", i);
+		EXPECT_STATUS(
+			pg_source_write_all(source, name, "x", 1, NULL, &error),
+			PG_OK);
+	}
+	EXPECT_STATUS(pg_source_close(&source, &error), PG_OK);
+	EXPECT_STATUS(
+		pg_source_open(context, "reserved", NULL, &source, &error),
+		PG_OK);
+	EXPECT_STATUS(pg_source_validate(source, &error), PG_OK);
+	EXPECT_STATUS(pg_source_close(&source, &error), PG_OK);
+	options.archive.format = PG_PIGG2;
+	EXPECT_STATUS(pg_archive_builder_create_config(
+			context, "pigg", &options, &builder, &error),
+		PG_UNSUPPORTED);
+	EXPECT_EQ(nullptr, builder);
+	options.archive.format = PG_HOGG10;
+	options.hogg_user_capacity = UINT64_MAX;
+	EXPECT_STATUS(pg_archive_builder_create_config(
+			context, "limit", &options, &builder, &error),
+		PG_LIMIT);
+	EXPECT_EQ(nullptr, builder);
+	EXPECT_STATUS(pg_context_close(&context, &error), PG_OK);
+}
+
+TEST_F(ApiBuilder, StagingPolicy)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_error error;
+	ASSERT_EQ(0, directory("scratch"));
+	char scratch[] = "scratch";
+	pg_archive_build_options config = {{PG_HOGG10, 0, 0}, scratch, 0};
+	EXPECT_STATUS(pg_context_open(&context, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_create_config(
+			context, "staged", &config, &builder, &error),
+		PG_OK);
+	scratch[0] = 'X';
+	EXPECT_STATUS(pg_archive_builder_write_all(
+			builder, "a", "abc", 3, NULL, &error),
+		PG_OK);
+	EXPECT_STATUS(pg_archive_builder_finish(builder, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_close(&builder, &error), PG_OK);
+	EXPECT_STATUS(pg_context_close(&context, &error), PG_OK);
+}
+
 } // namespace

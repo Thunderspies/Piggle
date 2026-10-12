@@ -521,7 +521,9 @@ static pg_status pg_writer_compress(
 	pg_status status = PG_OK;
 	int result;
 
-	*out = tmpfile();
+	*out = pg_staging_open(
+		writer->builder ? writer->builder->staging_directory : NULL,
+		NULL);
 	if (!*out)
 		return PG_IO;
 	if (fseeko(writer->input, 0, SEEK_SET)) {
@@ -1905,13 +1907,13 @@ PG_API pg_status PG_CALL pg_writer_open_archive_builder(
 			options->entry.cached_header_size);
 	}
 	writer->options.entry.cached_header = writer->cached_header;
-	writer->pending_entry = (pg_builder_entry *)calloc(
-		1, sizeof(*writer->pending_entry));
+	writer->pending_entry =
+		(pg_builder_entry *)calloc(1, sizeof(*writer->pending_entry));
 	if (!writer->pending_entry) {
 		pg_writer_release_memory(writer);
 		return pg_result(PG_NOMEM, error);
 	}
-	writer->input = tmpfile();
+	writer->input = pg_staging_open(builder->staging_directory, NULL);
 	if (!writer->input) {
 		int code = errno;
 

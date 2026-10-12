@@ -8,6 +8,62 @@ World &world()
 	return *scope;
 }
 
+GIVEN("^a HOGG was created with room for 31 user entries$")
+{
+	World &w = world();
+	pg_archive_build_options options = {{PG_HOGG10, 0, 0}, nullptr, 31};
+
+	expect_status(pg_archive_builder_create_config(w.context,
+			"reserved.hogg", &options, &w.builder, &w.error),
+		PG_OK, w.error);
+	expect_status(
+		pg_archive_builder_finish(w.builder, &w.error), PG_OK, w.error);
+	expect_status(
+		pg_archive_builder_close(&w.builder, &w.error), PG_OK, w.error);
+	pg_source_options writable = {PG_HOGG10, PG_WRITE, 0};
+
+	w.active = "reserve";
+	w.paths[w.active] = "reserved.hogg";
+	expect_status(pg_source_open(w.context, "reserved.hogg", &writable,
+			&w.sources[w.active], &w.error),
+		PG_OK, w.error);
+}
+
+WHEN("^I add 40 named files to the existing archive$")
+{
+	World &w = world();
+
+	for (unsigned i = 0; i < 40; i++) {
+		std::string name = "file/" + std::to_string(i);
+
+		expect_status(
+			pg_source_write_all(w.source(), name.c_str(),
+				name.data(), name.size(), nullptr, &w.error),
+			PG_OK, w.error);
+		w.names.push_back(name);
+	}
+}
+
+THEN("^every addition is readable after reopening the archive$")
+{
+	World &w = world();
+
+	expect_status(pg_source_close(&w.sources[w.active], &w.error), PG_OK,
+		w.error);
+	expect_status(pg_source_open(w.context, w.paths[w.active].c_str(),
+			nullptr, &w.sources[w.active], &w.error),
+		PG_OK, w.error);
+	for (const auto &name : w.names) {
+		char bytes[64];
+		size_t count;
+
+		expect_status(pg_source_read_all(w.source(), name.c_str(),
+				bytes, sizeof(bytes), &count, &w.error),
+			PG_OK, w.error);
+		EXPECT_EQ(std::string(bytes, count), name);
+	}
+}
+
 GIVEN("^a HOGG has an unchanged reader and an editable entry$")
 {
 	World &w = world();
