@@ -63,6 +63,7 @@ CHECK_IMPORT(pg_writer_finish);
 CHECK_IMPORT(pg_writer_close);
 CHECK_IMPORT(pg_source_open);
 CHECK_IMPORT(pg_source_inspect);
+CHECK_IMPORT(pg_source_set_staging_directory);
 CHECK_IMPORT(pg_source_read_all);
 CHECK_IMPORT(pg_source_read_all_alloc);
 CHECK_IMPORT(pg_source_write_all);

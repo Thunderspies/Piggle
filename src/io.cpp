@@ -690,6 +690,7 @@ static pg_status pg_writer_stage(pg_writer *writer)
 			goto cleanup;
 		}
 		pg_md5_update(&stored_hash, bytes, amount);
+		builder->payload_copied_bytes += amount;
 		remaining -= amount;
 	}
 	if (fflush(builder->staging)) {
@@ -723,6 +724,8 @@ cleanup:
 		status = PG_IO;
 	writer->input = NULL;
 	if (status != PG_OK) {
+		/* The next entry reuses this stream as a new operation. */
+		clearerr(builder->staging);
 		free(entry);
 		writer->pending_entry = NULL;
 		return status;
@@ -1609,7 +1612,8 @@ static pg_status pg_writer_open_archive_source(pg_source *source,
 	builder->context = source->context;
 	builder->format = source->format;
 	builder->checksum_domain = source->checksum_domain;
-	builder->staging = tmpfile();
+	builder->staging_directory = source->staging_directory;
+	builder->staging = pg_staging_open(source->staging_directory, NULL);
 	if (!builder->staging) {
 		int code = errno;
 

@@ -2147,6 +2147,7 @@ static pg_status pg_source_release_coordinated(
 	pg_source_requests_free(source->prefix_requests);
 	pg_source_requests_free(source->shallow_requests);
 	free(source->native_path);
+	free(source->staging_directory);
 	pg_source_sync_destroy(source);
 	free(source);
 	return closed ? PG_IO : PG_OK;
@@ -5784,6 +5785,45 @@ pg_status pg_source_validate(pg_source *source, pg_error *error)
 	pg_status status =
 		pg_source_validate_coordinated(source, error);
 
+	pg_context_unlock(context);
+	return status;
+}
+
+pg_status pg_source_set_staging_directory(
+	pg_source *source, const char *directory, pg_error *error)
+{
+	pg_context *context = source ? source->context : NULL;
+
+	pg_context_lock(context);
+	pg_source_lock(source);
+	auto update = [&]() -> pg_status {
+		if (!source || (directory && !*directory))
+			return pg_result(PG_INVALID, error);
+		pg_status status = pg_source_control_status(source, 1);
+
+		if (status != PG_OK)
+			return pg_result(status, error);
+		if (source->format == PG_LOOSE)
+			return pg_result(PG_UNSUPPORTED, error);
+		if (source->access != PG_WRITE)
+			return pg_result(PG_READ_ONLY, error);
+		if (source->live_writers)
+			return pg_result(PG_BUSY, error);
+		char *resolved = NULL;
+		int native_code = 0;
+
+		if (directory)
+			status = pg_staging_resolve(
+				directory, &resolved, &native_code);
+		if (status == PG_OK) {
+			free(source->staging_directory);
+			source->staging_directory = resolved;
+		}
+		return pg_native_result(status, native_code, error);
+	};
+	pg_status status = update();
+
+	pg_source_unlock(source);
 	pg_context_unlock(context);
 	return status;
 }

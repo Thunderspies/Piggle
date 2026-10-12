@@ -34,6 +34,15 @@ PG_API pg_status PG_CALL pg_source_open(
 PG_API pg_status PG_CALL pg_source_inspect(pg_source *source,
 		pg_source_info *out, pg_error *error);
 
+/* Set archive-writer scratch policy. NULL resets library defaults; otherwise
+ * an existing directory is copied and resolved before return. Empty paths
+ * -> INVALID, loose sources -> UNSUPPORTED, live writers -> BUSY. Requires
+ * writable source and its control thread when attached. Failure retains the
+ * previous policy. This does not relocate an existing archive.
+ */
+PG_API pg_status PG_CALL pg_source_set_staging_directory(pg_source *source,
+		const char *native_directory, pg_error *error);
+
 /* Common tasks; named streaming uses pg_reader_open_source in io.h. */
 /* Read a named visible logical file into caller storage. Compose
  * source_find, file_read_all and file_close; no caller-owned temporary.
