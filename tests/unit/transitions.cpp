@@ -36,8 +36,9 @@ TEST_P(DeletedArchive, RetainedSelectionReportsStale)
 	EXPECT_EQ(error.status, PG_STALE);
 }
 
-INSTANTIATE_TEST_SUITE_P(
-	Formats, DeletedArchive, testing::Values(PG_PIGG2, PG_HOGG10));
+INSTANTIATE_TEST_SUITE_P(Formats, DeletedArchive,
+	testing::Values(static_cast<uint32_t>(PG_PIGG2),
+		static_cast<uint32_t>(PG_HOGG10)));
 
 class WatchedSubtree : public piggle_test::ContractTest,
 			public testing::WithParamInterface<uint32_t>
@@ -102,8 +103,10 @@ TEST_P(WatchedSubtree, DetachingDescendantsRevealsEarlierFile)
 
 #if defined(__linux__) || defined(_WIN32)
 INSTANTIATE_TEST_SUITE_P(Modes, WatchedSubtree,
-	testing::Values(PG_WATCH_SCAN, PG_WATCH_NATIVE));
+	testing::Values(static_cast<uint32_t>(PG_WATCH_SCAN),
+		static_cast<uint32_t>(PG_WATCH_NATIVE)));
 #else
 INSTANTIATE_TEST_SUITE_P(
-	Modes, WatchedSubtree, testing::Values(PG_WATCH_SCAN));
+	Modes, WatchedSubtree,
+	testing::Values(static_cast<uint32_t>(PG_WATCH_SCAN)));
 #endif
