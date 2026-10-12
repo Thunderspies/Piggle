@@ -6,6 +6,13 @@ _Static_assert(sizeof(pg_id) == sizeof(uint64_t), "identity ABI");
 
 int piggle_c11_contract(void)
 {
+	pg_archive_build_options options = {{PG_HOGG10, 0, 0}, NULL, 0};
+	pg_archive_builder *builder = NULL;
+	pg_error contract_error;
+	if (pg_archive_builder_create_config(NULL, "invalid", &options,
+		&builder, &contract_error) != PG_INVALID ||
+		builder)
+		return 1;
 	pg_context *context = NULL;
 	pg_error error;
 	char name[32];

@@ -407,6 +407,19 @@ inline pg_status PG_CALL tracked_pg_archive_builder_create_options(
 	return status;
 }
 
+inline pg_status PG_CALL tracked_pg_archive_builder_create_config(
+	pg_context *context, const char *path,
+	const pg_archive_build_options *options, pg_archive_builder **out,
+	pg_error *error)
+{
+	auto status = ::pg_archive_builder_create_config(
+		context, path, options, out, error);
+
+	if (status == PG_OK && out && *out)
+		retain(*out, ::pg_archive_builder_close);
+	return status;
+}
+
 inline pg_status PG_CALL tracked_pg_archive_builder_close(
 	pg_archive_builder **builder, pg_error *error)
 {
@@ -590,6 +603,8 @@ inline pg_status PG_CALL tracked_pg_writer_close(
 	piggle_test::tracked_pg_archive_builder_create
 #define pg_archive_builder_create_options                              \
 	piggle_test::tracked_pg_archive_builder_create_options
+#define pg_archive_builder_create_config \
+	piggle_test::tracked_pg_archive_builder_create_config
 #define pg_archive_builder_close                                       \
 	piggle_test::tracked_pg_archive_builder_close
 #define pg_reader_open_source piggle_test::tracked_pg_reader_open_source

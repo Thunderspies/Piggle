@@ -34,6 +34,15 @@ PG_API pg_status PG_CALL pg_archive_builder_create_options(
 		const pg_archive_options *options, pg_archive_builder **out,
 		pg_error *error);
 
+/* Create with construction policy; options and out are required. Copies
+ * all options and resolves staging_directory before returning. Same format,
+ * publication, identity, ownership and error rules as create_options.
+ * Capacity arithmetic overflow -> LIMIT; no handle on failure.
+ */
+PG_API pg_status PG_CALL pg_archive_builder_create_config(pg_context *context,
+	const char *native_path, const pg_archive_build_options *options,
+	pg_archive_builder **out, pg_error *error);
+
 /* Stage complete entries; use io.h for chunked or encoded input. */
 /* Stage one complete logical entry; no external commitment until builder
  * finish. NULL entry -> defaults; NULL buffer allowed only at size=0. Empty
