@@ -34,6 +34,13 @@ jobs:
             cc: gcc-14
             cxx: g++-14
             shell: bash
+          - name: Linux GCC Shared Debug
+            build_type: Debug
+            shared: true
+            os: ubuntu-24.04
+            cc: gcc-14
+            cxx: g++-14
+            shell: bash
           - name: Linux Clang Debug
             build_type: Debug
             os: ubuntu-24.04
@@ -48,6 +55,13 @@ jobs:
             shell: bash
           - name: Windows MSVC Debug
             build_type: Debug
+            os: windows-2022
+            cc: cl
+            cxx: cl
+            shell: pwsh
+          - name: Windows MSVC Shared Debug
+            build_type: Debug
+            shared: true
             os: windows-2022
             cc: cl
             cxx: cl
@@ -108,6 +122,7 @@ jobs:
           CI_BUILD_TYPE: ${{ matrix.build_type }}
           CI_C_COMPILER: ${{ matrix.cc }}
           CI_CXX_COMPILER: ${{ matrix.cxx }}
+          CI_SHARED_LIBRARY: ${{ matrix.shared && '1' || '0' }}
         run: |
           ruby -rjson -e '
             presets = {
@@ -121,6 +136,7 @@ jobs:
                 "cacheVariables" => {
                   "CMAKE_C_COMPILER" => ENV.fetch("CI_C_COMPILER"),
                   "CMAKE_CXX_COMPILER" => ENV.fetch("CI_CXX_COMPILER"),
+                  "BUILD_SHARED_LIBS" => ENV.fetch("CI_SHARED_LIBRARY") == "1",
                   "CMAKE_INSTALL_PREFIX" => "${sourceDir}/build/install",
                   "CPM_SOURCE_CACHE" => "${sourceDir}/build/cpm-cache"
                 }
@@ -147,7 +163,7 @@ jobs:
         run: cmake --preset ci
 
       - name: Build
-        run: cmake --build --preset ci --parallel 2
+        run: cmake --build --preset ci --parallel 2 -- -k 0
 
       - name: Run infrastructure regressions
         run: ctest --preset ci -L '^infrastructure$'
