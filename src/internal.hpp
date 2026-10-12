@@ -437,6 +437,9 @@ extern "C" void pg_tree_sources_discard(pg_tree *tree,
 
 struct pg_builder_entry {
 	pg_builder_entry *next;
+	pg_builder_entry *left;
+	pg_builder_entry *right;
+	unsigned height;
 	char *canonical_name;
 	char *original_name;
 	void *cached_header;
@@ -456,6 +459,10 @@ struct pg_archive_builder {
 	int parent_fd;
 	FILE *staging;
 	pg_builder_entry *entries;
+	pg_builder_entry *entries_tail;
+	pg_builder_entry *name_index;
+	uint64_t entry_count;
+	uint64_t name_comparisons;
 	struct stat target;
 	uint32_t format;
 	uint32_t flags;
@@ -464,6 +471,11 @@ struct pg_archive_builder {
 	int target_exists;
 	int finished;
 };
+
+pg_builder_entry *pg_builder_name_find(pg_archive_builder *builder,
+	const char *name);
+void pg_builder_entry_insert(pg_archive_builder *builder,
+	pg_builder_entry *entry);
 
 enum pg_writer_kind {
 	PG_WRITER_BUILDER = 1,
@@ -479,6 +491,7 @@ enum pg_writer_state {
 
 struct pg_writer {
 	pg_archive_builder *builder;
+	pg_builder_entry *pending_entry;
 	pg_context *context;
 	pg_source *source;
 	pg_unpack_target *unpack_target;

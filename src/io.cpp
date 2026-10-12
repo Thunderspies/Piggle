@@ -406,6 +406,7 @@ static pg_status pg_builder_options_check(
 
 static void pg_writer_release_memory(pg_writer *writer)
 {
+	free(writer->pending_entry);
 	free(writer->canonical_name);
 	free(writer->original_name);
 	free(writer->cached_header);
@@ -598,7 +599,8 @@ cleanup_file:
 static pg_status pg_writer_stage(pg_writer *writer)
 {
 	pg_archive_builder *builder = writer->builder;
-	pg_builder_entry *entry = NULL;
+	pg_builder_entry *entry = writer->pending_entry;
+
 	pg_md5 hash;
 	uint8_t digest[16], stored_digest[16];
 	pg_md5 stored_hash;
@@ -666,11 +668,6 @@ static pg_status pg_writer_stage(pg_writer *writer)
 		status = PG_LIMIT;
 		goto cleanup;
 	}
-	entry = (pg_builder_entry *)calloc(1, sizeof(*entry));
-	if (!entry) {
-		status = PG_NOMEM;
-		goto cleanup;
-	}
 	if (fseeko(builder->staging, 0, SEEK_END)) {
 		status = PG_IO;
 		goto cleanup;
@@ -728,6 +725,7 @@ cleanup:
 	writer->input = NULL;
 	if (status != PG_OK) {
 		free(entry);
+		writer->pending_entry = NULL;
 		return status;
 	}
 	entry->canonical_name = writer->canonical_name;
@@ -746,11 +744,8 @@ cleanup:
 	writer->canonical_name = NULL;
 	writer->original_name = NULL;
 	writer->cached_header = NULL;
-	pg_builder_entry **tail = &builder->entries;
-
-	while (*tail)
-		tail = &(*tail)->next;
-	*tail = entry;
+	writer->pending_entry = NULL;
+	pg_builder_entry_insert(builder, entry);
 	return PG_OK;
 }
 
@@ -1848,7 +1843,6 @@ PG_API pg_status PG_CALL pg_writer_open_archive_builder(
 	pg_error *error)
 {
 	pg_writer *writer;
-	pg_builder_entry *entry;
 	pg_status status;
 	char *canonical = NULL;
 	char *original = NULL;
@@ -1866,11 +1860,9 @@ PG_API pg_status PG_CALL pg_writer_open_archive_builder(
 	status = pg_normalize_owned(builder->context, name, &canonical);
 	if (status != PG_OK)
 		return pg_result(status, error);
-	for (entry = builder->entries; entry; entry = entry->next) {
-		if (strcmp(entry->canonical_name, canonical) == 0) {
-			free(canonical);
-			return pg_result(PG_EXISTS, error);
-		}
+	if (pg_builder_name_find(builder, canonical)) {
+		free(canonical);
+		return pg_result(PG_EXISTS, error);
 	}
 	if (options->entry.original_name) {
 		status = pg_normalize_owned(builder->context,
@@ -1926,6 +1918,12 @@ PG_API pg_status PG_CALL pg_writer_open_archive_builder(
 			options->entry.cached_header_size);
 	}
 	writer->options.entry.cached_header = writer->cached_header;
+	writer->pending_entry = (pg_builder_entry *)calloc(
+		1, sizeof(*writer->pending_entry));
+	if (!writer->pending_entry) {
+		pg_writer_release_memory(writer);
+		return pg_result(PG_NOMEM, error);
+	}
 	writer->input = tmpfile();
 	if (!writer->input) {
 		int code = errno;
