@@ -203,6 +203,7 @@ struct pg_source {
 	pg_context *context;
 	pg_source *next_in_context;
 	char *native_path;
+	char *staging_directory;
 	pg_source_record *records;
 	pg_source_record **record_index;
 	size_t record_count;
@@ -521,6 +522,12 @@ struct pg_archive_builder {
 	int staging_parent_fd;
 	char *staging_leaf;
 	uint64_t hogg_user_capacity;
+	int private_hogg;
+	uint64_t payload_copied_bytes;
+	uint64_t whole_archive_copied_bytes;
+	uint64_t relocated_bytes;
+	uint64_t growth_events;
+	uint64_t metadata_reserved;
 	pg_builder_entry *entries;
 	pg_builder_entry *entries_tail;
 	pg_builder_entry *name_index;

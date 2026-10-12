@@ -31,6 +31,11 @@ extern "C" ssize_t pwrite64(
 {
 	const unsigned char *data =
 		static_cast<const unsigned char *>(bytes);
+	if (fault_mode == 12) {
+		fault_mode = 0;
+		errno = ENOSPC;
+		return -1;
+	}
 	int marker = size == 4 && data[0] == 5 && data[1] == 172 &&
 		data[2] == 171 && data[3] == 222;
 

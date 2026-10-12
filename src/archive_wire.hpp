@@ -300,6 +300,71 @@ static inline pg_status pg_hogg_datalist(pg_archive_builder *builder,
 	return PG_OK;
 }
 
+/* Relocation copies only payloads covered by the final table reservation.
+ * Keep old ranges intact until the complete metadata image is published.
+ */
+static inline pg_status pg_hogg_prepare_private(pg_archive_builder *builder,
+	uint64_t base, uint32_t slots, uint64_t *data_offset,
+	uint8_t digest[16])
+{
+	if (fseeko(builder->staging, 0, SEEK_END))
+		return PG_IO;
+	off_t measured = ftello(builder->staging);
+
+	if (measured < 0)
+		return PG_IO;
+	uint64_t end = (uint64_t)measured;
+
+	if (end < base)
+		end = base;
+	for (pg_builder_entry *entry = builder->entries; entry;
+		entry = entry->next) {
+		if (!entry->stored_size || entry->stage_offset >= base)
+			continue;
+		if (end > INT64_MAX - entry->stored_size)
+			return PG_LIMIT;
+		uint8_t bytes[65536];
+		uint64_t done = 0;
+
+		while (done < entry->stored_size) {
+			size_t amount =
+				entry->stored_size - done < sizeof(bytes)
+				? (size_t)(entry->stored_size - done)
+				: sizeof(bytes);
+
+			if (fseeko(builder->staging,
+				(off_t)(entry->stage_offset + done),
+				SEEK_SET) ||
+				fread(bytes, 1, amount, builder->staging) !=
+					amount ||
+				fseeko(builder->staging, (off_t)(end + done),
+					SEEK_SET) ||
+				fwrite(bytes, 1, amount, builder->staging) !=
+					amount)
+				return PG_IO;
+			done += amount;
+		}
+		if (fflush(builder->staging))
+			return PG_IO;
+		entry->stage_offset = end;
+		end += entry->stored_size;
+		builder->relocated_bytes += entry->stored_size;
+	}
+	if (end > INT64_MAX || fseeko(builder->staging, (off_t)end, SEEK_SET))
+		return PG_IO;
+	if (base > builder->metadata_reserved) {
+		builder->growth_events++;
+		builder->metadata_reserved = base;
+	}
+	*data_offset = end;
+	pg_status status =
+		pg_hogg_datalist(builder, builder->staging, slots, digest);
+
+	if (status == PG_OK && fflush(builder->staging))
+		status = PG_IO;
+	return status;
+}
+
 static inline pg_status pg_hogg_write(pg_archive_builder *builder, FILE *out)
 {
 	uint32_t users;
@@ -308,6 +373,7 @@ static inline pg_status pg_hogg_write(pg_archive_builder *builder, FILE *out)
 	uint32_t data_size;
 	uint64_t base;
 	uint64_t offset;
+	uint64_t private_data_offset = 0;
 	uint32_t index = 0;
 	uint32_t data_id = 0;
 	uint8_t datalist_digest[16];
@@ -321,6 +387,12 @@ static inline pg_status pg_hogg_write(pg_archive_builder *builder, FILE *out)
 	status = pg_hogg_datalist(builder, NULL, slots, datalist_digest);
 	if (status != PG_OK)
 		return status;
+	if (builder->private_hogg) {
+		status = pg_hogg_prepare_private(builder, base, slots,
+			&private_data_offset, datalist_digest);
+		if (status != PG_OK || fseeko(out, 0, SEEK_SET))
+			return status != PG_OK ? status : PG_IO;
+	}
 	pg_wire_u32(header, 0xdeadf00d);
 	pg_wire_u16(header + 4, 10);
 	pg_wire_u16(header + 6, 1024);
@@ -335,7 +407,8 @@ static inline pg_status pg_hogg_write(pg_archive_builder *builder, FILE *out)
 	for (entry = builder->entries; entry; entry = entry->next) {
 		uint8_t record[32] = {};
 
-		pg_wire_u64(record, offset);
+		pg_wire_u64(record,
+			builder->private_hogg ? entry->stage_offset : offset);
 		pg_wire_u32(record + 8, (uint32_t)entry->stored_size);
 		pg_wire_u32(record + 12, (uint32_t)entry->mtime);
 		memcpy(record + 16, entry->digest, 4);
@@ -347,7 +420,8 @@ static inline pg_status pg_hogg_write(pg_archive_builder *builder, FILE *out)
 	}
 	uint8_t datalist_record[32] = {};
 
-	pg_wire_u64(datalist_record, offset);
+	pg_wire_u64(datalist_record,
+		builder->private_hogg ? private_data_offset : offset);
 	pg_wire_u32(datalist_record + 8, data_size);
 	memcpy(datalist_record + 16, datalist_digest, 4);
 	pg_wire_u16(datalist_record + 24, 0xfffe);
@@ -388,6 +462,8 @@ static inline pg_status pg_hogg_write(pg_archive_builder *builder, FILE *out)
 		if (pg_wire_write(out, free_ea, sizeof(free_ea)) != PG_OK)
 			return PG_IO;
 	}
+	if (builder->private_hogg)
+		return PG_OK;
 	for (entry = builder->entries; entry; entry = entry->next) {
 		if (pg_wire_payload(out, builder, entry) != PG_OK)
 			return PG_IO;
