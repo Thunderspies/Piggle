@@ -5,6 +5,103 @@
 
 #include <fcntl.h>
 
+static unsigned pg_builder_height(pg_builder_entry *entry)
+{
+	return entry ? entry->height : 0;
+}
+
+static void pg_builder_height_update(pg_builder_entry *entry)
+{
+	unsigned left = pg_builder_height(entry->left);
+	unsigned right = pg_builder_height(entry->right);
+
+	entry->height = 1 + (left > right ? left : right);
+}
+
+static pg_builder_entry *pg_builder_rotate_left(pg_builder_entry *entry)
+{
+	pg_builder_entry *root = entry->right;
+
+	entry->right = root->left;
+	root->left = entry;
+	pg_builder_height_update(entry);
+	pg_builder_height_update(root);
+	return root;
+}
+
+static pg_builder_entry *pg_builder_rotate_right(pg_builder_entry *entry)
+{
+	pg_builder_entry *root = entry->left;
+
+	entry->left = root->right;
+	root->right = entry;
+	pg_builder_height_update(entry);
+	pg_builder_height_update(root);
+	return root;
+}
+
+pg_builder_entry *pg_builder_name_find(
+	pg_archive_builder *builder, const char *name)
+{
+	pg_builder_entry *entry = builder->name_index;
+
+	while (entry) {
+		builder->name_comparisons++;
+		int order = strcmp(name, entry->canonical_name);
+
+		if (!order)
+			return entry;
+		entry = order < 0 ? entry->left : entry->right;
+	}
+	return NULL;
+}
+
+static pg_builder_entry *pg_builder_index_insert(pg_archive_builder *builder,
+	pg_builder_entry *root, pg_builder_entry *entry)
+{
+	if (!root) {
+		entry->height = 1;
+		return entry;
+	}
+	builder->name_comparisons++;
+	if (strcmp(entry->canonical_name, root->canonical_name) < 0)
+		root->left =
+			pg_builder_index_insert(builder, root->left, entry);
+	else
+		root->right =
+			pg_builder_index_insert(builder, root->right, entry);
+	pg_builder_height_update(root);
+	int balance = (int)pg_builder_height(root->left) -
+		(int)pg_builder_height(root->right);
+
+	if (balance > 1) {
+		if (pg_builder_height(root->left->right) >
+			pg_builder_height(root->left->left))
+			root->left = pg_builder_rotate_left(root->left);
+		return pg_builder_rotate_right(root);
+	}
+	if (balance < -1) {
+		if (pg_builder_height(root->right->left) >
+			pg_builder_height(root->right->right))
+			root->right = pg_builder_rotate_right(root->right);
+		return pg_builder_rotate_left(root);
+	}
+	return root;
+}
+
+void pg_builder_entry_insert(
+	pg_archive_builder *builder, pg_builder_entry *entry)
+{
+	builder->name_index =
+		pg_builder_index_insert(builder, builder->name_index, entry);
+	if (builder->entries_tail)
+		builder->entries_tail->next = entry;
+	else
+		builder->entries = entry;
+	builder->entries_tail = entry;
+	builder->entry_count++;
+}
+
 static pg_status pg_builder_recheck(
 	pg_archive_builder *builder, int *native_code)
 {

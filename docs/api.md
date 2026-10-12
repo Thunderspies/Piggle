@@ -722,3 +722,11 @@ inside an observer wait for a later poll.
 The 0.2 API extends plain option, inspection and change structs. Rebuild
 clients against matching headers and library; mixing 0.1 structs with a 0.2
 binary is unsupported. Existing archive wire formats are unchanged.
+
+## Builder name indexing
+
+Builder name lookup uses a private balanced canonical-name index. Completed
+entries retain insertion order. Metadata is allocated before opening a writer;
+failed validation or cleanup leaves the name available and earlier entries
+usable. Entry insertion performs O(log N) comparisons and constant-time ordered
+append. Final metadata assembly still traverses completed entries.

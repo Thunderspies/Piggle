@@ -6,7 +6,7 @@ piggle_configure_target(c11_consumer)
 
 add_executable(unit_tests main.cpp consumer.cpp transitions.cpp
 	$<TARGET_OBJECTS:c11_consumer>
-	api_arguments.cpp api_checksum.cpp api_contract.cpp api_cpp.cpp
+	api_builder.cpp api_arguments.cpp api_checksum.cpp api_contract.cpp api_cpp.cpp
 	api_discovery.cpp api_entries.cpp api_flows.cpp api_invalid.cpp
 	api_lease.cpp api_managed.cpp api_memory.cpp api_metadata.cpp
 	api_regressions.cpp api_roundtrip.cpp api_seek.cpp api_state.cpp
@@ -38,3 +38,9 @@ if(WIN32 AND BUILD_SHARED_LIBS)
 endif()
 
 include(register.cmake)
+
+if(TARGET allocation_probe)
+	target_compile_definitions(unit_tests PRIVATE
+		PIGGLE_TEST_ALLOCATION_PATH="$<TARGET_FILE:allocation_probe>")
+	add_dependencies(unit_tests allocation_probe)
+endif()
