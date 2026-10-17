@@ -154,3 +154,13 @@ These boundaries keep the library focused on named whole files, exact physical
 selections, predictable publication, and caller-controlled scheduling. Adding a
 new capability requires defining its identity, lifetime, failure, scheduling,
 and cleanup contract at the lowest layer before adding convenience adapters.
+
+## Stored transfer acceptance
+
+Applications distributing prevalidated compressed objects can use explicit
+unchecked stored readers and the stored-entry builder writer. These APIs copy
+exact stored bytes and supplied checksum metadata while retaining identity,
+bounds, metadata validation and atomic publication. They do not decode or hash
+payloads. Checked operations keep their existing integrity behavior. This
+lets an application place acceptance at object acquisition rather than repeat
+it for every archive copy.

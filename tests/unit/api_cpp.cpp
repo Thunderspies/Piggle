@@ -45,6 +45,7 @@ CHECK_IMPORT(pg_file_verify);
 CHECK_IMPORT(pg_file_delete);
 CHECK_IMPORT(pg_file_close);
 CHECK_IMPORT(pg_cursor_close);
+CHECK_IMPORT(pg_writer_open_archive_builder_stored);
 CHECK_IMPORT(pg_reader_open_source);
 CHECK_IMPORT(pg_reader_open_tree);
 CHECK_IMPORT(pg_reader_open);

@@ -1329,3 +1329,66 @@ THEN("^public timestamps remain whole Unix seconds$")
 }
 
 } // namespace
+
+GIVEN("^I stage malformed stored bytes with a supplied archive digest$")
+{
+	World &w = world();
+	pg_stored_write_options options = {};
+
+	expect_status(pg_archive_builder_create(w.context, "stored.hogg",
+		PG_HOGG10, 0, &w.builder, &w.error), PG_OK, w.error);
+	options.logical_size = 100;
+	options.stored_size = 3;
+	options.encoding = PG_ZLIB;
+	options.digest_kind = PG_DIGEST_MD5_32;
+	options.digest[0] = 42;
+	expect_status(pg_writer_open_archive_builder_stored(w.builder, "a",
+		&options, &w.writer, &w.error), PG_OK, w.error);
+	w.write("bad");
+	w.finished();
+}
+
+WHEN("^I publish the stored entry and read it unchecked$")
+{
+	World &w = world();
+
+	expect_status(pg_archive_builder_finish(w.builder, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_archive_builder_close(&w.builder, &w.error),
+		PG_OK, w.error);
+	pg_source *source = NULL;
+
+	expect_status(pg_source_open(w.context, "stored.hogg", NULL,
+		&source, &w.error), PG_OK, w.error);
+	expect_status(pg_source_find(source, "a", &w.file, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_source_close(&source, &w.error), PG_OK, w.error);
+	expect_status(pg_reader_open(w.file, PG_READ_STORED_UNCHECKED,
+		&w.reader, &w.error), PG_OK, w.error);
+}
+
+THEN("^the stored bytes and supplied metadata are preserved$")
+{
+	World &w = world();
+	pg_file_info info;
+
+	EXPECT_EQ(w.chunk(w.reader, 8), "bad");
+	EXPECT_EQ(w.chunk(w.reader, 8), "");
+	expect_status(w.status, PG_END, w.error);
+	expect_status(pg_file_inspect(w.file, &info, &w.error),
+		PG_OK, w.error);
+	EXPECT_EQ(info.digest[0], 42);
+	EXPECT_EQ(info.logical_size, 100u);
+	EXPECT_EQ(info.stored_size, 3u);
+}
+
+THEN("^a checked stored reader rejects the malformed payload$")
+{
+	World &w = world();
+
+	expect_status(pg_reader_close(&w.reader, &w.error), PG_OK, w.error);
+	expect_status(pg_reader_open(w.file, PG_READ_STORED,
+		&w.reader, &w.error), PG_OK, w.error);
+	w.chunk(w.reader, 8);
+	expect_status(w.status, PG_CORRUPT, w.error);
+}

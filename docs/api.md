@@ -347,8 +347,10 @@ with per-handle serialization, just like an explicitly selected reader.
 at zero. Logical mode decodes; stored mode returns the exact stored payload,
 with reader metadata describing its encoding and exposed length. Stored EOF
 still validates decoding, logical length and the available profile-selected
-digest. There is no unchecked extraction mode. An independent reader does not move another
-reader. Native readers capture one regular file's identity, size and timestamp.
+digest. `PG_READ_STORED_UNCHECKED` instead returns stored bytes without
+payload decoding or digest work, including at EOF. It preserves bounds,
+identity, seeking, retention, watching and cleanup checks. Metadata parsing
+remains checked. An independent reader does not move another reader. Native readers capture one regular file's identity, size and timestamp.
 
 Positive reads return up to capacity. The final nonempty read validates before
 OK; completed OK with positive capacity always delivers at least one byte.
@@ -648,8 +650,8 @@ Source options select LOGICAL (zero/default) or STORED checksums. STORED is
 supported for HOGG user records only. The four wire bytes have no domain tag;
 opening with the wrong profile produces CHECKSUM when verification fails.
 Internal DataList records always retain their logical checksum convention.
-Both reader representations verify exact encoding and decoded length as well
-as the selected digest. There is no accept-either fallback.
+Both checked reader representations verify exact encoding and decoded length
+as well as the selected digest. There is no accept-either fallback.
 
 `pg_archive_builder_create_options` accepts an explicit archive profile;
 `pg_archive_builder_create` retains logical defaults. Pack options select the
@@ -862,3 +864,22 @@ Process-interruption tests exercise boundaries before/after checkpoint
 selection and after publication. They do not establish power-loss guarantees
 for hardware or filesystems that ignore durability requests. Partial entry
 streams and compressor-state resumption are outside this API.
+
+## Accepted stored transfers
+
+`pg_writer_open_archive_builder_stored` stages caller-accepted stored bytes.
+It uses the normal write/finish/close sequence and publication boundaries, but
+copies payloads and supplied archive digests without decoding, hashing or
+encoding. Exactly `stored_size` bytes are required. Raw (`PG_LOGICAL`) lengths
+must match; compressed (`PG_ZLIB`) logical and stored lengths must be nonzero.
+The digest domain must match the builder profile. Full MD5 is accepted by both
+formats; the four-byte MD5 prefix is accepted only by HOGG. Unused digest bytes
+must be zero. Name, timestamp, header, ownership, format limits and duplicate
+rules match the checked entry writer. Opening copies all borrowed metadata.
+
+This follows MiniZip's explicit [raw transfer interface][minizip-raw]: callers
+supply the logical length and checksum alongside already encoded bytes. The
+caller owns payload acceptance. Ordinary readers and writers remain checked;
+archive metadata and the internal DataList retain their checked behavior.
+
+[minizip-raw]: https://raw.githubusercontent.com/madler/zlib/develop/contrib/minizip/zip.h

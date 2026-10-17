@@ -35,6 +35,12 @@ int piggle_c11_contract(void)
 			NULL, NULL, NULL, &contract_error) != PG_INVALID ||
 		pg_archive_builder_discard(NULL, &contract_error) != PG_INVALID)
 		return 1;
+	pg_stored_write_options stored = {0};
+	pg_writer *writer = NULL;
+
+	if (pg_writer_open_archive_builder_stored(NULL, "a", &stored,
+		&writer, &contract_error) != PG_INVALID || writer)
+		return 1;
 	pg_context *context = NULL;
 	pg_error error;
 	char name[32];
