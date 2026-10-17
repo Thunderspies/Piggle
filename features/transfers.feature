@@ -188,3 +188,10 @@ Feature: Whole-file sequential transfer and publication
     Then the reader reports stale
     And a source rescan advances the copy generation
     And public timestamps remain whole Unix seconds
+
+  @IO-028
+  Scenario: Copy accepted stored bytes without checking their payload
+    Given I stage malformed stored bytes with a supplied archive digest
+    When I publish the stored entry and read it unchecked
+    Then the stored bytes and supplied metadata are preserved
+    And a checked stored reader rejects the malformed payload

@@ -20,6 +20,7 @@ using ::pg_reader_close;
 using ::pg_writer_open_source;
 using ::pg_writer_open_file;
 using ::pg_writer_open_archive_builder;
+using ::pg_writer_open_archive_builder_stored;
 using ::pg_writer_open_native;
 using ::pg_unpack_target_open;
 using ::pg_writer_open_unpack;
