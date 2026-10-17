@@ -90,3 +90,8 @@ the command-line tool; it defaults to off when included as a subdirectory.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for code style, commit guidelines, and
 dependency policy.
+
+Accepted pre-encoded objects can be transferred with
+`PG_READ_STORED_UNCHECKED` and `pg_writer_open_archive_builder_stored`.
+These explicit operations preserve stored bytes and supplied archive checksums
+without payload decoding or hashing. See [the API contract](docs/api.md).

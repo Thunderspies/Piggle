@@ -588,6 +588,7 @@ struct pg_writer {
 	uint64_t target_record;
 	int named_target;
 	int metadata_only;
+	int stored_unchecked;
 	uint32_t flags;
 	int target_exists;
 	char *canonical_name;

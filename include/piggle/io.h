@@ -10,7 +10,8 @@ extern "C" {
 
 /* Open named visible content with one owned reader. Compose source_find,
  * reader_open and file_close; retain one selection, never retry/retarget.
- * representation is READ_LOGICAL (usual) or READ_STORED. Same lookup,
+ * representation is READ_LOGICAL, READ_STORED or READ_STORED_UNCHECKED.
+ * Same lookup,
  * staleness, metadata and verification rules as the selected-file reader.
  * out required, NULL until successful return after temporary cleanup.
  * Failure closes private reader/selection and preserves the first error.
@@ -37,7 +38,9 @@ PG_API pg_status PG_CALL pg_reader_open_tree(pg_tree *tree,
 /* Open independent reader at zero for captured physical copy.
  * READ_LOGICAL decodes; READ_STORED exposes its exact stored bytes. Both
  * validate available profile-selected digests at EOF; stored reads decode for
- * validation. Retains file/source. Changed identity -> STALE. Owned reader.
+ * validation. READ_STORED_UNCHECKED returns exact stored bytes without
+ * decoding or digest work, including at EOF; identity/bounds still checked.
+ * Retains file/source. Changed identity -> STALE. Owned reader.
  * A tree-selected file starts name tracking while its reader is open if that
  * tree is still live and watching; tree close ends tracking, not reading.
  * Opening during an observer callback is allowed and registers the watch.
@@ -90,7 +93,8 @@ PG_API pg_status PG_CALL pg_reader_tell(pg_reader *reader,
  * Last nonempty read verifies before OK; next positive read -> END/0.
  * Empty files verify and return END/0 on the first positive read. Early
  * close makes no verification claim. Earlier chunks are provisional until
- * verified EOF: keep consumer effects reversible. Failed reads make
+ * verified EOF: keep consumer effects reversible. Unchecked stored readers
+ * skip payload verification in all these cases. Failed reads make
  * the reader close-only. Invalid calls leave it unchanged.
  */
 PG_API pg_status PG_CALL pg_reader_read(
@@ -157,6 +161,18 @@ PG_API pg_status PG_CALL pg_writer_open_archive_builder(
 		pg_writer **out,
 		pg_error *error);
 
+/* Stage accepted stored bytes and supplied archive digest without payload
+ * validation, decoding, hashing or encoding. options/out required; copies
+ * options and borrowed metadata before return. Same ownership, duplicate,
+ * lease, length, cleanup and publication rules as the checked builder writer.
+ * finish requires exactly stored_size bytes; no payload validation at finish.
+ * Use only after caller acceptance; metadata/profile validation remains active.
+ */
+PG_API pg_status PG_CALL pg_writer_open_archive_builder_stored(
+		pg_archive_builder *builder, const char *name,
+		const pg_stored_write_options *options, pg_writer **out,
+		pg_error *error);
+
 /* Stage one complete native regular file replacement; flags=0 is exclusive,
  * OVERWRITE permits regular-file replacement at finish. Other flags INVALID.
  * Options required; FORCE compression/nonempty header/original_name
@@ -201,7 +217,8 @@ PG_API pg_status PG_CALL pg_writer_write(
 		size_t *bytes,
 		pg_error *error);
 
-/* Require exact lengths, validate/decode/hash/encode and finish the entry.
+/* Require exact lengths and finish the entry. Checked writers validate,
+ * decode, hash and encode; stored writers copy supplied bytes and metadata.
  * Source/native writer: publish replacement. Archive entry writer: install
  * one private staged entry without publishing an archive.
  * Empty files valid. Accepted finish is one-shot; any outcome makes writer

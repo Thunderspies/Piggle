@@ -141,3 +141,100 @@ TEST_F(ApiChecksum, api_checksum)
 }
 
 } // namespace
+
+TEST_F(ApiChecksum, StoredTransferSkipsPayloadValidation)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *source = NULL;
+	pg_reader *reader = NULL;
+	pg_writer *writer = NULL;
+	pg_error error;
+	pg_stored_write_options options = {};
+
+	ASSERT_EQ(pg_context_open(&context, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_create(context, "unchecked.hogg",
+		PG_HOGG10, 0, &builder, &error), PG_OK);
+	options.logical_size = 100;
+	options.stored_size = 3;
+	options.encoding = PG_ZLIB;
+	options.digest_kind = PG_DIGEST_MD5_32;
+	options.digest[0] = 42;
+	ASSERT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_OK);
+	size_t count = 0;
+
+	EXPECT_EQ(pg_writer_write(writer, "bad!", 4, &count, &error),
+		PG_INVALID);
+	EXPECT_EQ(count, 0u);
+	ASSERT_EQ(pg_writer_write(writer, "bad", 3, &count, &error), PG_OK);
+	ASSERT_EQ(pg_writer_finish(writer, &error), PG_OK);
+	ASSERT_EQ(pg_writer_close(&writer, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_finish(builder, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_close(&builder, &error), PG_OK);
+	ASSERT_EQ(pg_source_open(context, "unchecked.hogg", NULL,
+		&source, &error), PG_OK);
+	ASSERT_EQ(pg_reader_open_source(source, "a", PG_READ_STORED_UNCHECKED,
+		&reader, &error), PG_OK);
+	pg_reader_info info = {};
+	char bytes[8] = {};
+
+	ASSERT_EQ(pg_reader_inspect(reader, &info, &error), PG_OK);
+	EXPECT_EQ(info.size, 3u);
+	EXPECT_EQ(info.encoding, PG_ZLIB);
+	ASSERT_EQ(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+		&error), PG_OK);
+	EXPECT_EQ(count, 3u);
+	EXPECT_EQ(memcmp(bytes, "bad", 3), 0);
+	ASSERT_EQ(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+		&error), PG_END);
+	ASSERT_EQ(pg_reader_seek(reader, 1, &error), PG_OK);
+	ASSERT_EQ(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+		&error), PG_OK);
+	EXPECT_EQ(count, 2u);
+	ASSERT_EQ(pg_reader_close(&reader, &error), PG_OK);
+	ASSERT_EQ(pg_reader_open_source(source, "a", PG_READ_STORED,
+		&reader, &error), PG_OK);
+	EXPECT_EQ(pg_reader_read(reader, bytes, sizeof(bytes), &count,
+		&error), PG_CORRUPT);
+	ASSERT_EQ(pg_reader_close(&reader, &error), PG_OK);
+	ASSERT_EQ(pg_source_close(&source, &error), PG_OK);
+	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
+}
+
+TEST_F(ApiChecksum, StoredWriterValidatesMetadataAndExactLength)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_writer *writer = NULL;
+	pg_error error;
+	pg_stored_write_options options = {};
+
+	ASSERT_EQ(pg_context_open(&context, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_create(context, "stored.pigg",
+		PG_PIGG2, 0, &builder, &error), PG_OK);
+	options.logical_size = options.stored_size = 3;
+	options.digest_kind = PG_DIGEST_MD5_32;
+	EXPECT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_INVALID);
+	options.digest_kind = PG_DIGEST_MD5;
+	options.checksum_domain = PG_CHECKSUM_STORED;
+	EXPECT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_INVALID);
+	options.checksum_domain = PG_CHECKSUM_LOGICAL;
+	options.stored_size = 2;
+	EXPECT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_INVALID);
+	options.encoding = PG_ZLIB;
+	options.stored_size = 0;
+	EXPECT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_INVALID);
+	options.encoding = PG_LOGICAL;
+	options.stored_size = 3;
+	ASSERT_EQ(pg_writer_open_archive_builder_stored(builder, "a",
+		&options, &writer, &error), PG_OK);
+	EXPECT_EQ(pg_writer_finish(writer, &error), PG_INVALID);
+	ASSERT_EQ(pg_writer_close(&writer, &error), PG_OK);
+	ASSERT_EQ(pg_archive_builder_close(&builder, &error), PG_OK);
+	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
+}

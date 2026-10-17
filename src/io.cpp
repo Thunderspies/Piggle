@@ -616,51 +616,56 @@ static pg_status pg_writer_stage(pg_writer *writer)
 		return PG_INVALID;
 	if (fflush(writer->input))
 		return PG_IO;
-	pg_md5_init(&hash);
-	if (writer->options.encoding == PG_ZLIB)
-		status = pg_writer_verify_zlib(writer, &hash, NULL);
-	else
-		status = pg_writer_hash_raw(writer, &hash, NULL);
-	if (status != PG_OK)
-		return status;
-	pg_md5_finish(&hash, digest);
-	if (writer->options.entry.digest_kind != PG_DIGEST_NONE &&
-		writer->options.entry.expected_digest_domain ==
-			PG_CHECKSUM_LOGICAL) {
-		size_t count = writer->options.entry.digest_kind ==
-				PG_DIGEST_MD5
-			? 16
-			: 4;
-
-		if (memcmp(digest,
-				writer->options.entry.expected_digest,
-				count) != 0)
-			return PG_CHECKSUM;
-	}
-	if (writer->options.encoding == PG_ZLIB &&
-		!writer->options.logical_size) {
-		stored_size = 0;
-		encoding = PG_LOGICAL;
-	}
-	if (writer->options.encoding == PG_LOGICAL &&
-		writer->options.logical_size &&
-		writer->options.entry.compression !=
-			PG_COMPRESS_NEVER) {
-		stored_size = 0;
-		status = pg_writer_compress(
-			writer, &compressed, &stored_size);
+	if (writer->stored_unchecked) {
+		memcpy(digest, writer->options.entry.expected_digest,
+			sizeof(digest));
+	} else {
+		pg_md5_init(&hash);
+		if (writer->options.encoding == PG_ZLIB)
+			status = pg_writer_verify_zlib(writer, &hash, NULL);
+		else
+			status = pg_writer_hash_raw(writer, &hash, NULL);
 		if (status != PG_OK)
 			return status;
-		if (writer->options.entry.compression ==
-				PG_COMPRESS_FORCE ||
-			stored_size < writer->options.logical_size) {
-			payload = compressed;
-			encoding = PG_ZLIB;
-		} else {
-			if (fclose(compressed))
-				return PG_IO;
-			compressed = NULL;
-			stored_size = writer->options.logical_size;
+		pg_md5_finish(&hash, digest);
+		if (writer->options.entry.digest_kind != PG_DIGEST_NONE &&
+			writer->options.entry.expected_digest_domain ==
+				PG_CHECKSUM_LOGICAL) {
+			size_t count = writer->options.entry.digest_kind ==
+					PG_DIGEST_MD5
+				? 16
+				: 4;
+
+			if (memcmp(digest,
+					writer->options.entry.expected_digest,
+					count) != 0)
+				return PG_CHECKSUM;
+		}
+		if (writer->options.encoding == PG_ZLIB &&
+			!writer->options.logical_size) {
+			stored_size = 0;
+			encoding = PG_LOGICAL;
+		}
+		if (writer->options.encoding == PG_LOGICAL &&
+			writer->options.logical_size &&
+			writer->options.entry.compression !=
+				PG_COMPRESS_NEVER) {
+			stored_size = 0;
+			status = pg_writer_compress(
+				writer, &compressed, &stored_size);
+			if (status != PG_OK)
+				return status;
+			if (writer->options.entry.compression ==
+					PG_COMPRESS_FORCE ||
+				stored_size < writer->options.logical_size) {
+				payload = compressed;
+				encoding = PG_ZLIB;
+			} else {
+				if (fclose(compressed))
+					return PG_IO;
+				compressed = NULL;
+				stored_size = writer->options.logical_size;
+			}
 		}
 	}
 	if (builder->format == PG_HOGG10 && stored_size > 0xfffffffeu) {
@@ -676,7 +681,8 @@ static pg_status pg_writer_stage(pg_writer *writer)
 		status = PG_IO;
 		goto cleanup;
 	}
-	pg_md5_init(&stored_hash);
+	if (!writer->stored_unchecked)
+		pg_md5_init(&stored_hash);
 	remaining = stored_size;
 	while (remaining) {
 		size_t amount = remaining < sizeof(bytes)
@@ -689,7 +695,8 @@ static pg_status pg_writer_stage(pg_writer *writer)
 			status = PG_IO;
 			goto cleanup;
 		}
-		pg_md5_update(&stored_hash, bytes, amount);
+		if (!writer->stored_unchecked)
+			pg_md5_update(&stored_hash, bytes, amount);
 		builder->payload_copied_bytes += amount;
 		remaining -= amount;
 	}
@@ -697,24 +704,26 @@ static pg_status pg_writer_stage(pg_writer *writer)
 		status = PG_IO;
 		goto cleanup;
 	}
-	pg_md5_finish(&stored_hash, stored_digest);
-	if (writer->options.entry.digest_kind != PG_DIGEST_NONE &&
-		writer->options.entry.expected_digest_domain ==
-			PG_CHECKSUM_STORED) {
-		size_t count = writer->options.entry.digest_kind ==
-				PG_DIGEST_MD5
-			? 16
-			: 4;
+	if (!writer->stored_unchecked) {
+		pg_md5_finish(&stored_hash, stored_digest);
+		if (writer->options.entry.digest_kind != PG_DIGEST_NONE &&
+			writer->options.entry.expected_digest_domain ==
+				PG_CHECKSUM_STORED) {
+			size_t count = writer->options.entry.digest_kind ==
+					PG_DIGEST_MD5
+				? 16
+				: 4;
 
-		if (memcmp(stored_digest,
-				writer->options.entry.expected_digest,
-				count)) {
-			status = PG_CHECKSUM;
-			goto cleanup;
+			if (memcmp(stored_digest,
+					writer->options.entry.expected_digest,
+					count)) {
+				status = PG_CHECKSUM;
+				goto cleanup;
+			}
 		}
+		if (builder->checksum_domain == PG_CHECKSUM_STORED)
+			memcpy(digest, stored_digest, sizeof(digest));
 	}
-	if (builder->checksum_domain == PG_CHECKSUM_STORED)
-		memcpy(digest, stored_digest, sizeof(digest));
 	status = PG_OK;
 
 cleanup:
@@ -741,7 +750,8 @@ cleanup:
 	entry->mtime = writer->options.entry.mtime;
 	entry->encoding = encoding;
 	memcpy(entry->digest, digest, sizeof(digest));
-	if (builder->format == PG_PIGG2 && !entry->logical_size)
+	if (!writer->stored_unchecked && builder->format == PG_PIGG2 &&
+		!entry->logical_size)
 		memset(entry->digest, 0, sizeof(entry->digest));
 	writer->canonical_name = NULL;
 	writer->original_name = NULL;
@@ -988,7 +998,7 @@ PG_API pg_status PG_CALL pg_reader_open_source(pg_source *source,
 	if (!out)
 		return pg_result(PG_INVALID, error);
 	*out = NULL;
-	if (!source || !name || representation > PG_READ_STORED)
+	if (!source || !name || representation > PG_READ_STORED_UNCHECKED)
 		return pg_result(PG_INVALID, error);
 	status = pg_source_find(source, name, &file, &work_error);
 	if (status != PG_OK) {
@@ -1026,7 +1036,7 @@ PG_API pg_status PG_CALL pg_reader_open_tree(pg_tree *tree,
 	if (!out)
 		return pg_result(PG_INVALID, error);
 	*out = NULL;
-	if (!tree || !name || representation > PG_READ_STORED)
+	if (!tree || !name || representation > PG_READ_STORED_UNCHECKED)
 		return pg_result(PG_INVALID, error);
 	status = pg_tree_find(tree, name, &file, &work_error);
 	if (status != PG_OK) {
@@ -1093,7 +1103,7 @@ static pg_status pg_reader_open_locked(pg_file *file,
 	if (!out)
 		return pg_result(PG_INVALID, error);
 	*out = NULL;
-	if (!file || !file->source || representation > PG_READ_STORED)
+	if (!file || !file->source || representation > PG_READ_STORED_UNCHECKED)
 		return pg_result(PG_INVALID, error);
 	if (file->source->recovery_required)
 		return pg_result(PG_RECOVERY_REQUIRED, error);
@@ -1214,12 +1224,12 @@ static pg_status pg_reader_open_locked(pg_file *file,
 	reader->file_info = file->info;
 	reader->payload_offset = payload_offset;
 	reader->representation = representation;
-	reader->info.size = representation == PG_READ_STORED
+	reader->info.size = representation != PG_READ_LOGICAL
 		? file->info.stored_size
 		: file->info.logical_size;
 	reader->info.logical_size = file->info.logical_size;
 	reader->info.mtime = file->info.mtime;
-	reader->info.encoding = representation == PG_READ_STORED
+	reader->info.encoding = representation != PG_READ_LOGICAL
 		? file->info.encoding
 		: (uint32_t)PG_LOGICAL;
 	*out = reader;
@@ -1364,7 +1374,8 @@ static pg_status pg_reader_read_locked(pg_reader *reader, void *buffer,
 		return pg_native_result(status, native_code, error);
 	}
 	if (reader->position == reader->info.size) {
-		if (archive && !reader->verified) {
+		if (archive && !reader->verified &&
+			reader->representation != PG_READ_STORED_UNCHECKED) {
 			status = pg_archive_verify_payload(reader->fd,
 				(uint64_t)reader->identity.st_size,
 				&reader->file_info,
@@ -1422,7 +1433,8 @@ static pg_status pg_reader_read_locked(pg_reader *reader, void *buffer,
 			return pg_native_result(
 				status, native_code, error);
 		}
-		if (archive) {
+		if (archive &&
+			reader->representation != PG_READ_STORED_UNCHECKED) {
 			status = pg_archive_verify_payload(reader->fd,
 				(uint64_t)reader->identity.st_size,
 				&reader->file_info,
@@ -2610,5 +2622,43 @@ pg_status pg_reader_seek(
 	pg_status status = pg_reader_seek_locked(reader, offset, error);
 
 	pg_source_unlock(source);
+	return status;
+}
+
+PG_API pg_status PG_CALL pg_writer_open_archive_builder_stored(
+	pg_archive_builder *builder, const char *name,
+	const pg_stored_write_options *options, pg_writer **out,
+	pg_error *error)
+{
+	if (!out)
+		return pg_result(PG_INVALID, error);
+	*out = NULL;
+	if (!builder || !options ||
+		options->checksum_domain != builder->checksum_domain ||
+		(options->digest_kind != PG_DIGEST_MD5 &&
+			options->digest_kind != PG_DIGEST_MD5_32) ||
+		(builder->format == PG_PIGG2 &&
+			options->digest_kind != PG_DIGEST_MD5) ||
+		(options->encoding == PG_ZLIB &&
+			!options->logical_size))
+		return pg_result(PG_INVALID, error);
+	pg_write_options checked = {};
+
+	checked.logical_size = options->logical_size;
+	checked.input_size = options->stored_size;
+	checked.encoding = options->encoding;
+	checked.entry.compression = PG_COMPRESS_NEVER;
+	checked.entry.mtime = options->mtime;
+	checked.entry.digest_kind = options->digest_kind;
+	checked.entry.expected_digest_domain = options->checksum_domain;
+	memcpy(checked.entry.expected_digest, options->digest, 16);
+	checked.entry.original_name = options->original_name;
+	checked.entry.cached_header = options->cached_header;
+	checked.entry.cached_header_size = options->cached_header_size;
+	pg_status status = pg_writer_open_archive_builder(builder, name,
+		&checked, out, error);
+
+	if (status == PG_OK)
+		(*out)->stored_unchecked = 1;
 	return status;
 }
