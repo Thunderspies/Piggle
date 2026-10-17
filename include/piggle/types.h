@@ -98,7 +98,8 @@ enum { PG_LOGICAL = 0, PG_ZLIB }; /* Write input / stored representation. */
 /* Digest domain is independent of encoding and reader representation. */
 enum { PG_CHECKSUM_LOGICAL = 0, PG_CHECKSUM_STORED };
 enum { PG_DIGEST_NONE = 0, PG_DIGEST_MD5, PG_DIGEST_MD5_32 };
-enum { PG_READ_LOGICAL = 0, PG_READ_STORED }; /* Reader representation. */
+/* Unchecked stored reads retain identity/bounds checks, skip payload checks. */
+enum { PG_READ_LOGICAL = 0, PG_READ_STORED, PG_READ_STORED_UNCHECKED };
 /* Native creation is exclusive by default. Never overwrite links/specials. */
 enum { PG_OVERWRITE = 1u };
 
@@ -165,6 +166,24 @@ typedef struct pg_write_options {
 	uint64_t input_size;
 	uint32_t encoding;
 } pg_write_options;
+/* Already accepted stored payload and archive metadata. No payload decoding,
+ * hashing or encoding. Raw lengths must match; ZLIB lengths must be nonzero.
+ * digest_kind must be MD5 or (HOGG only) MD5_32; unused digest bytes zero.
+ * checksum_domain must match the builder. Names/header copy at open, as for
+ * pg_entry_options. mtime and format limits match checked writes.
+ */
+typedef struct pg_stored_write_options {
+	uint64_t logical_size;
+	uint64_t stored_size;
+	uint32_t encoding;
+	uint32_t digest_kind;
+	uint8_t digest[16];
+	uint32_t checksum_domain;
+	int64_t mtime;
+	const char *original_name;
+	const void *cached_header;
+	size_t cached_header_size;
+} pg_stored_write_options;
 /* Immediate, no allocation/I/O/failure; out must point to writable storage.
  * Writes every field: default entry, LOGICAL, both lengths=logical_size.
  */
