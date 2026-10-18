@@ -316,7 +316,8 @@ static inline pg_status pg_pigg_index(pg_source *source)
 		}
 		if (header_id != UINT32_MAX && headers[header_id].size) {
 			copy->header_blob = pg_header_copy(
-				headers[header_id].data, headers[header_id].size);
+				headers[header_id].data,
+				headers[header_id].size);
 			if (!copy->header_blob) {
 				free((void *)copy->info.original_name);
 				free((void *)copy->info.canonical_name);
