@@ -227,4 +227,24 @@ THEN("^the source is still not attached to the tree$")
 	expect_status(w.status, PG_NOT_FOUND, w.error);
 }
 
+WHEN("^I open that archive through a dot-containing native path$")
+{
+	World &w = world();
+
+	w.paths["extra"] = ".\\Extra.PIGG";
+	w.open("extra");
+	expect_status(w.status, PG_OK, w.error);
+}
+
+THEN("^its reported path matches the full native archive path$")
+{
+	World &w = world();
+	pg_source_info info;
+
+	expect_status(pg_source_inspect(w.source(), &info, &w.error),
+		PG_OK, w.error);
+	EXPECT_EQ(std::filesystem::absolute("Extra.PIGG").u8string(),
+		info.native_path);
+}
+
 } // namespace

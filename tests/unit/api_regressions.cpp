@@ -1728,4 +1728,119 @@ TEST_F(ApiRegressions, regression_windows_cli)
 }
 #endif
 
+#ifdef _WIN32
+
+TEST_F(ApiRegressions, windows_resolve_source_spellings)
+{
+	pg_context *context = NULL;
+	pg_error error;
+	const char *names[] = {"data/a"};
+	const char *name = "MiXeD-\xe7\x8c\xab.PIGG";
+
+	ASSERT_EQ(pg_context_open(&context, &error), PG_OK);
+	ASSERT_EQ(archive(context, name, PG_PIGG2, names, 1), 0);
+	std::string root = std::filesystem::current_path().u8string();
+	std::string expected = root + "\\" + name;
+	std::vector<std::string> paths = {
+		std::string(".\\") + name,
+		root + "\\.\\" + name,
+		root + "/.\\" + name,
+		root.substr(0, 2) + ".\\" + name,
+		root.substr(2) + "\\.\\" + name,
+		std::string("..\\") +
+			std::filesystem::current_path().filename().u8string() +
+			"\\" + name
+	};
+
+	for (const auto &path : paths) {
+		SCOPED_TRACE(path);
+		pg_source *source = NULL;
+		pg_source_info info;
+		pg_buffer bytes = {};
+
+		ASSERT_EQ(pg_source_open(context, path.c_str(), NULL,
+			&source, &error), PG_OK) << error.native_code;
+		ASSERT_EQ(pg_source_inspect(source, &info, &error), PG_OK);
+		EXPECT_EQ(expected, info.native_path);
+		ASSERT_EQ(pg_source_read_all_alloc(source, "data/a", 3,
+			&bytes, &error), PG_OK);
+		EXPECT_EQ(std::string((char *)bytes.data, bytes.size), "old");
+		pg_buffer_free(&bytes);
+		ASSERT_EQ(pg_source_close(&source, &error), PG_OK);
+	}
+	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
+}
+
+TEST_F(ApiRegressions, windows_preserve_device_source_paths)
+{
+	pg_context *context = NULL;
+	pg_error error;
+	const char *names[] = {"data/a"};
+
+	ASSERT_EQ(pg_context_open(&context, &error), PG_OK);
+	ASSERT_EQ(archive(context, "device.pigg", PG_PIGG2, names, 1), 0);
+	std::string root = std::filesystem::current_path().u8string();
+	std::string ordinary = root + "\\device.pigg";
+	std::string trailing = "\\\\?\\" + ordinary + ".";
+	auto from = std::filesystem::u8path(ordinary).wstring();
+	auto to = std::filesystem::u8path(trailing).wstring();
+
+	ASSERT_TRUE(CopyFileW(from.c_str(), to.c_str(), TRUE));
+	for (const auto &path : {"\\\\?\\" + ordinary,
+		"\\\\.\\" + ordinary, trailing}) {
+		SCOPED_TRACE(path);
+		pg_source *source = NULL;
+		pg_source_info info;
+		pg_buffer bytes = {};
+
+		ASSERT_EQ(pg_source_open(context, path.c_str(), NULL,
+			&source, &error), PG_OK) << error.native_code;
+		ASSERT_EQ(pg_source_inspect(source, &info, &error), PG_OK);
+		EXPECT_EQ(path, info.native_path);
+		ASSERT_EQ(pg_source_read_all_alloc(source, "data/a", 3,
+			&bytes, &error), PG_OK);
+		EXPECT_EQ(std::string((char *)bytes.data, bytes.size), "old");
+		pg_buffer_free(&bytes);
+		ASSERT_EQ(pg_source_close(&source, &error), PG_OK);
+	}
+	EXPECT_TRUE(DeleteFileW(to.c_str()));
+	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
+}
+
+TEST_F(ApiRegressions, windows_write_through_dot_parents)
+{
+	pg_context *context = NULL;
+	pg_error error;
+	pg_write_options options;
+
+	ASSERT_EQ(pg_context_open(&context, &error), PG_OK);
+	ASSERT_TRUE(CreateDirectoryW(L"parent", NULL));
+	pg_write_options_init(&options, 3);
+	for (const char *data : {"one", "two"}) {
+		pg_writer *writer = NULL;
+		size_t count;
+
+		ASSERT_EQ(pg_writer_open_native(context,
+			".\\parent/./output.bin", &options, PG_OVERWRITE,
+			&writer, &error), PG_OK);
+		ASSERT_EQ(pg_writer_write(writer, data, 3, &count, &error),
+			PG_OK);
+		ASSERT_EQ(count, 3u);
+		ASSERT_EQ(pg_writer_finish(writer, &error), PG_OK);
+		ASSERT_EQ(pg_writer_close(&writer, &error), PG_OK);
+		pg_reader *reader = NULL;
+		char bytes[3];
+
+		ASSERT_EQ(pg_reader_open_native(context,
+			"parent\\output.bin", &reader, &error), PG_OK);
+		ASSERT_EQ(pg_reader_read(reader, bytes, 3, &count, &error),
+			PG_OK);
+		EXPECT_EQ(std::string(bytes, count), data);
+		ASSERT_EQ(pg_reader_close(&reader, &error), PG_OK);
+	}
+	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
+}
+
+#endif
+
 } // namespace
