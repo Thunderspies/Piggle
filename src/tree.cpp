@@ -1353,11 +1353,7 @@ static void pg_tree_records_free(pg_source_record *record)
 	while (record) {
 		pg_source_record *next = record->next;
 
-		free((void *)record->info.canonical_name);
-		free((void *)record->info.original_name);
-		free((void *)record->info.cached_header);
-		free(record->native_path);
-		free(record);
+		pg_record_release(record);
 		record = next;
 	}
 }
@@ -1378,6 +1374,7 @@ static pg_source_record *pg_tree_records_clone(pg_source_record *source,
 		if (!copy)
 			goto clone_failed;
 		*copy = *source;
+		copy->header_blob = NULL;
 		copy->next = NULL;
 		copy->info.canonical_name =
 			strdup(source->info.canonical_name);

@@ -358,7 +358,9 @@ static void pg_hogg_record_publish(
 		if (prepared) {
 			free((void *)old->info.canonical_name);
 			free((void *)old->info.original_name);
-			free((void *)old->info.cached_header);
+			pg_header_release(old->header_blob,
+				old->info.cached_header);
+			old->header_blob = prepared->header_blob;
 			old->info = prepared->info;
 			old->payload_offset = prepared->payload_offset;
 			free(prepared);
@@ -646,11 +648,7 @@ static void pg_source_records_free(pg_source_record *record)
 	while (record) {
 		pg_source_record *next = record->next;
 
-		free((void *)record->info.canonical_name);
-		free((void *)record->info.original_name);
-		free((void *)record->info.cached_header);
-		free(record->native_path);
-		free(record);
+		pg_record_release(record);
 		record = next;
 	}
 }
@@ -4235,7 +4233,11 @@ pg_status pg_source_select(pg_source *source,
 		strdup(selected->info.canonical_name);
 	file->info.original_name = strdup(selected->info.original_name);
 	file->info.cached_header = NULL;
-	if (selected->info.cached_header_size) {
+	if (selected->header_blob) {
+		file->header_blob = selected->header_blob;
+		++file->header_blob->references;
+		file->info.cached_header = selected->info.cached_header;
+	} else if (selected->info.cached_header_size) {
 		file->info.cached_header =
 			malloc(selected->info.cached_header_size);
 		if (file->info.cached_header)
@@ -4251,7 +4253,7 @@ pg_status pg_source_select(pg_source *source,
 			!file->info.cached_header)) {
 		free((void *)file->info.canonical_name);
 		free((void *)file->info.original_name);
-		free((void *)file->info.cached_header);
+		pg_header_release(file->header_blob, file->info.cached_header);
 		free(file->native_path);
 		free(file);
 		return pg_result(PG_NOMEM, error);
@@ -4260,7 +4262,7 @@ pg_status pg_source_select(pg_source *source,
 	if (status != PG_OK) {
 		free((void *)file->info.canonical_name);
 		free((void *)file->info.original_name);
-		free((void *)file->info.cached_header);
+		pg_header_release(file->header_blob, file->info.cached_header);
 		free(file->native_path);
 		free(file);
 		return pg_result(status, error);

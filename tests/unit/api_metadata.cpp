@@ -161,6 +161,67 @@ TEST_F(ApiMetadata, api_metadata_loose)
 	ASSERT_EQ(0, loose_case());
 }
 
+TEST_F(ApiMetadata, CapturedHeadersSurviveReplacementAndRescan)
+{
+	for (uint32_t format : {PG_PIGG2, PG_HOGG10}) {
+		pg_context *context = NULL;
+		pg_source *source = NULL;
+		pg_archive_builder *builder = NULL;
+		pg_cursor *cursor = NULL;
+		pg_file *old = NULL, *captured = NULL, *current = NULL;
+		pg_error error = {};
+		std::vector<unsigned char> first(131073), second(131073);
+
+		for (size_t i = 0; i < first.size(); ++i) {
+			first[i] = (unsigned char)(i * 13 + i / 251);
+			second[i] = (unsigned char)(first[i] ^ 0xa5);
+		}
+		pg_entry_options entry = {};
+		entry.cached_header = first.data();
+		entry.cached_header_size = first.size();
+		pg_source_options options = {format, PG_WRITE, 0};
+		ASSERT_EQ(0, clear_file("retained-headers"));
+		ASSERT_EQ(PG_OK, pg_context_open(&context, &error));
+		ASSERT_EQ(PG_OK, pg_archive_builder_create(context,
+			"retained-headers", format, 0, &builder, &error));
+		ASSERT_EQ(PG_OK, pg_archive_builder_write_all(builder, "a",
+			payload, sizeof(payload), &entry, &error));
+		ASSERT_EQ(PG_OK, pg_archive_builder_finish(builder, &error));
+		ASSERT_EQ(PG_OK, pg_archive_builder_close(&builder, &error));
+		ASSERT_EQ(PG_OK, pg_source_open(context, "retained-headers",
+			&options, &source, &error));
+		ASSERT_EQ(PG_OK, pg_source_find(source, "a", &old, &error));
+		ASSERT_EQ(PG_OK, pg_source_files(source, NULL, &cursor,
+			&error));
+		pg_file_info original = {};
+		ASSERT_EQ(PG_OK, pg_file_inspect(old, &original, &error));
+		pg_metadata_options edit = {PG_METADATA_HEADER, 0,
+			second.data(), second.size()};
+		ASSERT_EQ(PG_OK, pg_file_update_metadata(old, &edit, &error));
+		ASSERT_EQ(PG_OK, pg_source_rescan(source, &error));
+		ASSERT_EQ(PG_OK, pg_source_find(source, "a", &current, &error));
+		ASSERT_EQ(PG_OK, pg_cursor_next(cursor, &captured, &error));
+		ASSERT_EQ(PG_OK, pg_cursor_close(&cursor, &error));
+		ASSERT_EQ(first.size(), original.cached_header_size);
+		EXPECT_EQ(0, memcmp(original.cached_header, first.data(),
+			first.size()));
+		for (pg_file *file : {old, captured, current}) {
+			pg_file_info info = {};
+			const auto &expected = file == current ? second : first;
+			ASSERT_EQ(PG_OK, pg_file_inspect(file, &info, &error));
+			ASSERT_EQ(expected.size(), info.cached_header_size);
+			EXPECT_EQ(0, memcmp(info.cached_header, expected.data(),
+				expected.size()));
+		}
+		ASSERT_EQ(PG_OK, pg_file_close(&old, &error));
+		ASSERT_EQ(PG_OK, pg_file_close(&captured, &error));
+		ASSERT_EQ(PG_OK, pg_file_close(&current, &error));
+		ASSERT_EQ(PG_OK, pg_source_validate(source, &error));
+		ASSERT_EQ(PG_OK, pg_source_close(&source, &error));
+		ASSERT_EQ(PG_OK, pg_context_close(&context, &error));
+	}
+}
+
 TEST_F(ApiMetadata, LargeHoggInventoryRetainsNamesHeadersAndBytes)
 {
 	pg_context *context = NULL;

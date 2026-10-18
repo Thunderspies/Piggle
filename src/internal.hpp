@@ -103,7 +103,37 @@ static inline void pg_context_child_drop(pg_context *context)
 	pg_atomic_decrement(&context->children);
 }
 
+/* Header snapshots share immutable bytes under the context lock. */
+struct pg_header_blob {
+	size_t references;
+};
+
+static inline pg_header_blob *pg_header_copy(const void *data, size_t size)
+{
+	if (size > SIZE_MAX - sizeof(pg_header_blob))
+		return NULL;
+	pg_header_blob *blob =
+		(pg_header_blob *)malloc(sizeof(*blob) + size);
+
+	if (blob) {
+		blob->references = 1;
+		memcpy(blob + 1, data, size);
+	}
+	return blob;
+}
+
+static inline void pg_header_release(pg_header_blob *blob, const void *data)
+{
+	if (blob) {
+		if (!--blob->references)
+			free(blob);
+	} else {
+		free((void *)data);
+	}
+}
+
 struct pg_source_record {
+	pg_header_blob *header_blob;
 	pg_source_record *next;
 	pg_source_record *previous;
 	uint32_t attributes;
@@ -123,7 +153,7 @@ static inline void pg_record_release(pg_source_record *record)
 {
 	free((void *)record->info.canonical_name);
 	free((void *)record->info.original_name);
-	free((void *)record->info.cached_header);
+	pg_header_release(record->header_blob, record->info.cached_header);
 	free(record->native_path);
 	free(record);
 }
@@ -385,6 +415,7 @@ pg_status pg_tree_control_status(const pg_tree *tree, int mutation);
 pg_status pg_source_control_status(const pg_source *source, int mutation);
 
 struct pg_file {
+	pg_header_blob *header_blob;
 	pg_source *source;
 	uint32_t attributes;
 	pg_tree *origin_tree;

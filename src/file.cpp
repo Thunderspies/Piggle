@@ -462,7 +462,8 @@ PG_API pg_status PG_CALL pg_file_close(pg_file **file, pg_error *error)
 		pg_tree *origin = owned->origin_tree;
 		free((void *)owned->info.canonical_name);
 		free((void *)owned->info.original_name);
-		free((void *)owned->info.cached_header);
+		pg_header_release(owned->header_blob,
+			owned->info.cached_header);
 		free(owned->native_path);
 		status = pg_source_release(owned->source, &native_code);
 		free(owned);
