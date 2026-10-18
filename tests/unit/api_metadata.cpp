@@ -161,4 +161,75 @@ TEST_F(ApiMetadata, api_metadata_loose)
 	ASSERT_EQ(0, loose_case());
 }
 
+TEST_F(ApiMetadata, LargeHoggInventoryRetainsNamesHeadersAndBytes)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *source = NULL;
+	pg_cursor *cursor = NULL;
+	pg_error error = {};
+	pg_source_options options = {PG_HOGG10, PG_READ, 0};
+	const unsigned entries = 5000;
+
+	ASSERT_EQ(0, clear_file("large-metadata.hogg"));
+	ASSERT_EQ(PG_OK, pg_context_open(&context, &error));
+	ASSERT_EQ(PG_OK, pg_archive_builder_create(context,
+		"large-metadata.hogg", PG_HOGG10, 0, &builder, &error));
+	for (unsigned i = 0; i < entries; ++i) {
+		char name[48];
+		unsigned char header[13];
+		for (unsigned j = 0; j < sizeof(header); ++j)
+			header[j] = (unsigned char)(
+				(i >> (8 * (j % 4))) ^ j);
+		pg_entry_options entry = {};
+		entry.compression = PG_COMPRESS_NEVER;
+		entry.mtime = i;
+		entry.cached_header = header;
+		entry.cached_header_size = sizeof(header);
+		snprintf(name, sizeof(name), "nested/file_%04u.bin", i);
+		ASSERT_EQ(PG_OK, pg_archive_builder_write_all(builder, name,
+			payload, sizeof(payload), &entry, &error));
+	}
+	ASSERT_EQ(PG_OK, pg_archive_builder_finish(builder, &error));
+	ASSERT_EQ(PG_OK, pg_archive_builder_close(&builder, &error));
+	ASSERT_EQ(PG_OK, pg_source_open(context, "large-metadata.hogg",
+		&options, &source, &error)) << error.message;
+	ASSERT_EQ(PG_OK, pg_source_files(source, NULL, &cursor, &error));
+	for (unsigned i = 0; i < entries; ++i) {
+		pg_file *file = NULL;
+		pg_file_info info = {};
+		char name[48];
+		unsigned char header[13];
+		for (unsigned j = 0; j < sizeof(header); ++j)
+			header[j] = (unsigned char)(
+				(i >> (8 * (j % 4))) ^ j);
+		snprintf(name, sizeof(name), "nested/file_%04u.bin", i);
+		ASSERT_EQ(PG_OK, pg_cursor_next(cursor, &file, &error));
+		ASSERT_EQ(PG_OK, pg_file_inspect(file, &info, &error));
+		EXPECT_STREQ(name, info.canonical_name);
+		EXPECT_EQ(i, info.mtime);
+		EXPECT_EQ(sizeof(payload), info.logical_size);
+		EXPECT_EQ(sizeof(payload), info.stored_size);
+		ASSERT_EQ(sizeof(header), info.cached_header_size);
+		EXPECT_EQ(0, memcmp(header, info.cached_header,
+			sizeof(header)));
+		if (i % 997 == 0 || i + 1 == entries) {
+			unsigned char bytes[sizeof(payload)];
+			size_t size = 0;
+			ASSERT_EQ(PG_OK, pg_file_read_all(file, bytes,
+				sizeof(bytes), &size, &error));
+			EXPECT_EQ(sizeof(payload), size);
+			EXPECT_EQ(0, memcmp(bytes, payload, size));
+		}
+		ASSERT_EQ(PG_OK, pg_file_close(&file, &error));
+	}
+	pg_file *file = NULL;
+	EXPECT_EQ(PG_END, pg_cursor_next(cursor, &file, &error));
+	EXPECT_EQ(nullptr, file);
+	ASSERT_EQ(PG_OK, pg_cursor_close(&cursor, &error));
+	ASSERT_EQ(PG_OK, pg_source_validate(source, &error));
+	ASSERT_EQ(PG_OK, pg_source_close(&source, &error));
+	ASSERT_EQ(PG_OK, pg_context_close(&context, &error));
+}
+
 } // namespace

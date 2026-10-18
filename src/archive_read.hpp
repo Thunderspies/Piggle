@@ -60,6 +60,41 @@ static inline pg_status pg_read_span(int fd, uint64_t file_size,
 	return PG_OK;
 }
 
+struct pg_table_window {
+	uint8_t bytes[65536];
+	uint64_t base;
+	size_t size;
+};
+
+static inline pg_status pg_table_row(int fd, uint64_t file_size,
+	uint64_t table_base, uint32_t table_size, uint64_t offset,
+	size_t size, pg_table_window *window, const uint8_t **out)
+{
+	if (offset > table_size || size > table_size - offset)
+		return PG_CORRUPT;
+	uint64_t base = offset - offset % sizeof(window->bytes);
+
+	if (!window->size || window->base != base) {
+		size_t amount = sizeof(window->bytes);
+
+		if (amount > table_size - base)
+			amount = (size_t)(table_size - base);
+		pg_status status = pg_read_span(fd, file_size,
+			table_base + base, window->bytes, amount);
+
+		if (status != PG_OK)
+			return status;
+		window->base = base;
+		window->size = amount;
+	}
+	size_t within = (size_t)(offset - base);
+
+	if (within > window->size || size > window->size - within)
+		return PG_CORRUPT;
+	*out = window->bytes + within;
+	return PG_OK;
+}
+
 static inline void pg_pool_free(pg_pool_value *values, uint32_t count)
 {
 	uint32_t i;
@@ -473,6 +508,7 @@ static inline pg_status pg_hogg_index(pg_source *source)
 	uint8_t *data_bytes = NULL;
 	uint8_t *journal_bytes = NULL;
 	pg_pool_value *slots = NULL;
+	pg_table_window *tables = NULL;
 	uint64_t table_base;
 	uint64_t ea_base;
 	uint64_t metadata_end;
@@ -609,9 +645,15 @@ static inline pg_status pg_hogg_index(pg_source *source)
 			}
 		}
 	}
+	/* Both fixed row sizes divide the bounded read window. */
+	tables = (pg_table_window *)calloc(2, sizeof(*tables));
+	if (!tables) {
+		status = PG_NOMEM;
+		goto cleanup;
+	}
 	for (i = 0; i < file_count; i++) {
-		uint8_t record[32];
-		uint8_t ea[16];
+		const uint8_t *record;
+		const uint8_t *ea;
 		uint32_t stored_size;
 		uint32_t ea_id;
 		uint32_t name_id;
@@ -623,9 +665,8 @@ static inline pg_status pg_hogg_index(pg_source *source)
 		size_t required = 0;
 		pg_source_record *copy;
 
-		status = pg_read_span(source->fd, file_size,
-			table_base + (uint64_t)i * 32,
-			record, sizeof(record));
+		status = pg_table_row(source->fd, file_size, table_base,
+			file_bytes, (uint64_t)i * 32, 32, tables, &record);
 		if (status != PG_OK)
 			goto cleanup;
 		stored_size = pg_read_u32(record + 8);
@@ -649,8 +690,8 @@ static inline pg_status pg_hogg_index(pg_source *source)
 			status = PG_CORRUPT;
 			goto cleanup;
 		}
-		status = pg_read_span(source->fd, file_size,
-			ea_base + (uint64_t)ea_id * 16, ea, sizeof(ea));
+		status = pg_table_row(source->fd, file_size, ea_base,
+			ea_bytes, (uint64_t)ea_id * 16, 16, tables + 1, &ea);
 		if (status != PG_OK)
 			goto cleanup;
 		if (pg_read_u32(ea + 12) & 1) {
@@ -740,6 +781,7 @@ static inline pg_status pg_hogg_index(pg_source *source)
 	status = PG_OK;
 
 cleanup:
+	free(tables);
 	free(slots);
 	free(data_bytes);
 	free(journal_bytes);
