@@ -17,73 +17,159 @@ static inline uint32_t pg_md5_rotate(uint32_t value, unsigned shift)
 	return (value << shift) | (value >> (32 - shift));
 }
 
+static inline uint32_t pg_md5_step(uint32_t a, uint32_t b,
+	uint32_t function, uint32_t word, uint32_t constant, unsigned shift)
+{
+	return b + pg_md5_rotate(a + function + word + constant, shift);
+}
+
 static inline void pg_md5_block(pg_md5 *hash, const uint8_t *block)
 {
-	static const uint32_t constants[64] = {
-		0xd76aa478u, 0xe8c7b756u, 0x242070dbu, 0xc1bdceeeu,
-		0xf57c0fafu, 0x4787c62au, 0xa8304613u, 0xfd469501u,
-		0x698098d8u, 0x8b44f7afu, 0xffff5bb1u, 0x895cd7beu,
-		0x6b901122u, 0xfd987193u, 0xa679438eu, 0x49b40821u,
-		0xf61e2562u, 0xc040b340u, 0x265e5a51u, 0xe9b6c7aau,
-		0xd62f105du, 0x02441453u, 0xd8a1e681u, 0xe7d3fbc8u,
-		0x21e1cde6u, 0xc33707d6u, 0xf4d50d87u, 0x455a14edu,
-		0xa9e3e905u, 0xfcefa3f8u, 0x676f02d9u, 0x8d2a4c8au,
-		0xfffa3942u, 0x8771f681u, 0x6d9d6122u, 0xfde5380cu,
-		0xa4beea44u, 0x4bdecfa9u, 0xf6bb4b60u, 0xbebfbc70u,
-		0x289b7ec6u, 0xeaa127fau, 0xd4ef3085u, 0x04881d05u,
-		0xd9d4d039u, 0xe6db99e5u, 0x1fa27cf8u, 0xc4ac5665u,
-		0xf4292244u, 0x432aff97u, 0xab9423a7u, 0xfc93a039u,
-		0x655b59c3u, 0x8f0ccc92u, 0xffeff47du, 0x85845dd1u,
-		0x6fa87e4fu, 0xfe2ce6e0u, 0xa3014314u, 0x4e0811a1u,
-		0xf7537e82u, 0xbd3af235u, 0x2ad7d2bbu, 0xeb86d391u,
-	};
-	static const uint8_t shifts[64] = {
-		7, 12, 17, 22, 7, 12, 17, 22,
-		7, 12, 17, 22, 7, 12, 17, 22,
-		5, 9, 14, 20, 5, 9, 14, 20,
-		5, 9, 14, 20, 5, 9, 14, 20,
-		4, 11, 16, 23, 4, 11, 16, 23,
-		4, 11, 16, 23, 4, 11, 16, 23,
-		6, 10, 15, 21, 6, 10, 15, 21,
-		6, 10, 15, 21, 6, 10, 15, 21,
-	};
 	uint32_t words[16];
 	uint32_t a = hash->state[0];
 	uint32_t b = hash->state[1];
 	uint32_t c = hash->state[2];
 	uint32_t d = hash->state[3];
-	unsigned i;
 
-	for (i = 0; i < 16; i++) {
+	for (unsigned i = 0; i < 16; i++) {
 		const uint8_t *at = block + 4 * i;
 
 		words[i] = (uint32_t)at[0] | ((uint32_t)at[1] << 8) |
 			((uint32_t)at[2] << 16) | ((uint32_t)at[3] << 24);
 	}
-	for (i = 0; i < 64; i++) {
-		uint32_t function;
-		unsigned index;
-		uint32_t previous = d;
+	/* Fixed rounds expose constant rotations and word indices. */
+	a = pg_md5_step(a, b, (b & c) | (~b & d), words[0],
+		0xd76aa478u, 7);
+	d = pg_md5_step(d, a, (a & b) | (~a & c), words[1],
+		0xe8c7b756u, 12);
+	c = pg_md5_step(c, d, (d & a) | (~d & b), words[2],
+		0x242070dbu, 17);
+	b = pg_md5_step(b, c, (c & d) | (~c & a), words[3],
+		0xc1bdceeeu, 22);
+	a = pg_md5_step(a, b, (b & c) | (~b & d), words[4],
+		0xf57c0fafu, 7);
+	d = pg_md5_step(d, a, (a & b) | (~a & c), words[5],
+		0x4787c62au, 12);
+	c = pg_md5_step(c, d, (d & a) | (~d & b), words[6],
+		0xa8304613u, 17);
+	b = pg_md5_step(b, c, (c & d) | (~c & a), words[7],
+		0xfd469501u, 22);
+	a = pg_md5_step(a, b, (b & c) | (~b & d), words[8],
+		0x698098d8u, 7);
+	d = pg_md5_step(d, a, (a & b) | (~a & c), words[9],
+		0x8b44f7afu, 12);
+	c = pg_md5_step(c, d, (d & a) | (~d & b), words[10],
+		0xffff5bb1u, 17);
+	b = pg_md5_step(b, c, (c & d) | (~c & a), words[11],
+		0x895cd7beu, 22);
+	a = pg_md5_step(a, b, (b & c) | (~b & d), words[12],
+		0x6b901122u, 7);
+	d = pg_md5_step(d, a, (a & b) | (~a & c), words[13],
+		0xfd987193u, 12);
+	c = pg_md5_step(c, d, (d & a) | (~d & b), words[14],
+		0xa679438eu, 17);
+	b = pg_md5_step(b, c, (c & d) | (~c & a), words[15],
+		0x49b40821u, 22);
 
-		if (i < 16) {
-			function = (b & c) | (~b & d);
-			index = i;
-		} else if (i < 32) {
-			function = (d & b) | (~d & c);
-			index = (5 * i + 1) & 15;
-		} else if (i < 48) {
-			function = b ^ c ^ d;
-			index = (3 * i + 5) & 15;
-		} else {
-			function = c ^ (b | ~d);
-			index = (7 * i) & 15;
-		}
-		d = c;
-		c = b;
-		b += pg_md5_rotate(a + function + constants[i] +
-			words[index], shifts[i]);
-		a = previous;
-	}
+	a = pg_md5_step(a, b, (d & b) | (~d & c), words[1],
+		0xf61e2562u, 5);
+	d = pg_md5_step(d, a, (c & a) | (~c & b), words[6],
+		0xc040b340u, 9);
+	c = pg_md5_step(c, d, (b & d) | (~b & a), words[11],
+		0x265e5a51u, 14);
+	b = pg_md5_step(b, c, (a & c) | (~a & d), words[0],
+		0xe9b6c7aau, 20);
+	a = pg_md5_step(a, b, (d & b) | (~d & c), words[5],
+		0xd62f105du, 5);
+	d = pg_md5_step(d, a, (c & a) | (~c & b), words[10],
+		0x02441453u, 9);
+	c = pg_md5_step(c, d, (b & d) | (~b & a), words[15],
+		0xd8a1e681u, 14);
+	b = pg_md5_step(b, c, (a & c) | (~a & d), words[4],
+		0xe7d3fbc8u, 20);
+	a = pg_md5_step(a, b, (d & b) | (~d & c), words[9],
+		0x21e1cde6u, 5);
+	d = pg_md5_step(d, a, (c & a) | (~c & b), words[14],
+		0xc33707d6u, 9);
+	c = pg_md5_step(c, d, (b & d) | (~b & a), words[3],
+		0xf4d50d87u, 14);
+	b = pg_md5_step(b, c, (a & c) | (~a & d), words[8],
+		0x455a14edu, 20);
+	a = pg_md5_step(a, b, (d & b) | (~d & c), words[13],
+		0xa9e3e905u, 5);
+	d = pg_md5_step(d, a, (c & a) | (~c & b), words[2],
+		0xfcefa3f8u, 9);
+	c = pg_md5_step(c, d, (b & d) | (~b & a), words[7],
+		0x676f02d9u, 14);
+	b = pg_md5_step(b, c, (a & c) | (~a & d), words[12],
+		0x8d2a4c8au, 20);
+
+	a = pg_md5_step(a, b, b ^ c ^ d, words[5],
+		0xfffa3942u, 4);
+	d = pg_md5_step(d, a, a ^ b ^ c, words[8],
+		0x8771f681u, 11);
+	c = pg_md5_step(c, d, d ^ a ^ b, words[11],
+		0x6d9d6122u, 16);
+	b = pg_md5_step(b, c, c ^ d ^ a, words[14],
+		0xfde5380cu, 23);
+	a = pg_md5_step(a, b, b ^ c ^ d, words[1],
+		0xa4beea44u, 4);
+	d = pg_md5_step(d, a, a ^ b ^ c, words[4],
+		0x4bdecfa9u, 11);
+	c = pg_md5_step(c, d, d ^ a ^ b, words[7],
+		0xf6bb4b60u, 16);
+	b = pg_md5_step(b, c, c ^ d ^ a, words[10],
+		0xbebfbc70u, 23);
+	a = pg_md5_step(a, b, b ^ c ^ d, words[13],
+		0x289b7ec6u, 4);
+	d = pg_md5_step(d, a, a ^ b ^ c, words[0],
+		0xeaa127fau, 11);
+	c = pg_md5_step(c, d, d ^ a ^ b, words[3],
+		0xd4ef3085u, 16);
+	b = pg_md5_step(b, c, c ^ d ^ a, words[6],
+		0x04881d05u, 23);
+	a = pg_md5_step(a, b, b ^ c ^ d, words[9],
+		0xd9d4d039u, 4);
+	d = pg_md5_step(d, a, a ^ b ^ c, words[12],
+		0xe6db99e5u, 11);
+	c = pg_md5_step(c, d, d ^ a ^ b, words[15],
+		0x1fa27cf8u, 16);
+	b = pg_md5_step(b, c, c ^ d ^ a, words[2],
+		0xc4ac5665u, 23);
+
+	a = pg_md5_step(a, b, c ^ (b | ~d), words[0],
+		0xf4292244u, 6);
+	d = pg_md5_step(d, a, b ^ (a | ~c), words[7],
+		0x432aff97u, 10);
+	c = pg_md5_step(c, d, a ^ (d | ~b), words[14],
+		0xab9423a7u, 15);
+	b = pg_md5_step(b, c, d ^ (c | ~a), words[5],
+		0xfc93a039u, 21);
+	a = pg_md5_step(a, b, c ^ (b | ~d), words[12],
+		0x655b59c3u, 6);
+	d = pg_md5_step(d, a, b ^ (a | ~c), words[3],
+		0x8f0ccc92u, 10);
+	c = pg_md5_step(c, d, a ^ (d | ~b), words[10],
+		0xffeff47du, 15);
+	b = pg_md5_step(b, c, d ^ (c | ~a), words[1],
+		0x85845dd1u, 21);
+	a = pg_md5_step(a, b, c ^ (b | ~d), words[8],
+		0x6fa87e4fu, 6);
+	d = pg_md5_step(d, a, b ^ (a | ~c), words[15],
+		0xfe2ce6e0u, 10);
+	c = pg_md5_step(c, d, a ^ (d | ~b), words[6],
+		0xa3014314u, 15);
+	b = pg_md5_step(b, c, d ^ (c | ~a), words[13],
+		0x4e0811a1u, 21);
+	a = pg_md5_step(a, b, c ^ (b | ~d), words[4],
+		0xf7537e82u, 6);
+	d = pg_md5_step(d, a, b ^ (a | ~c), words[11],
+		0xbd3af235u, 10);
+	c = pg_md5_step(c, d, a ^ (d | ~b), words[2],
+		0x2ad7d2bbu, 15);
+	b = pg_md5_step(b, c, d ^ (c | ~a), words[9],
+		0xeb86d391u, 21);
+
 	hash->state[0] += a;
 	hash->state[1] += b;
 	hash->state[2] += c;
@@ -105,7 +191,9 @@ static inline void pg_md5_update(pg_md5 *hash, const void *input, size_t size)
 	const uint8_t *bytes = (const uint8_t *)input;
 
 	hash->length += size;
-	while (size) {
+	if (!size)
+		return;
+	if (hash->used) {
 		size_t amount = sizeof(hash->block) - hash->used;
 
 		if (amount > size)
@@ -114,10 +202,19 @@ static inline void pg_md5_update(pg_md5 *hash, const void *input, size_t size)
 		hash->used += amount;
 		bytes += amount;
 		size -= amount;
-		if (hash->used == sizeof(hash->block)) {
-			pg_md5_block(hash, hash->block);
-			hash->used = 0;
-		}
+		if (hash->used < sizeof(hash->block))
+			return;
+		pg_md5_block(hash, hash->block);
+		hash->used = 0;
+	}
+	while (size >= sizeof(hash->block)) {
+		pg_md5_block(hash, bytes);
+		bytes += sizeof(hash->block);
+		size -= sizeof(hash->block);
+	}
+	if (size) {
+		memcpy(hash->block, bytes, size);
+		hash->used = size;
 	}
 }
 
