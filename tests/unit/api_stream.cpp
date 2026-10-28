@@ -274,6 +274,54 @@ static int test_guards(void)
 
 using ApiStream = piggle_test::ContractTest;
 
+TEST_F(ApiStream, UnpackSelectionsAllowAnyOrderAndRejectIndependentCopies)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *source = NULL;
+	pg_cursor *cursor = NULL;
+	pg_unpack_target *target = NULL;
+	pg_file *files[4] = {}, *independent = NULL;
+
+	ASSERT_EQ(0, mkdir("unordered", 0700));
+	ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_create(context, "unordered.hogg",
+		PG_HOGG10, 0, &builder, NULL));
+	for (const char *name : {"a", "a!", "a-", "a."})
+		ASSERT_EQ(PG_OK, pg_archive_builder_write_all(builder, name,
+			"x", 1, NULL, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_finish(builder, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_close(&builder, NULL));
+	ASSERT_EQ(PG_OK, pg_source_open(context, "unordered.hogg", NULL,
+		&source, NULL));
+	ASSERT_EQ(PG_OK, pg_source_files(source, NULL, &cursor, NULL));
+	ASSERT_EQ(PG_OK, pg_unpack_target_open(cursor, "unordered", 0,
+		&target, NULL));
+	for (pg_file *&file : files)
+		ASSERT_EQ(PG_OK, pg_cursor_next(cursor, &file, NULL));
+	ASSERT_EQ(PG_OK, pg_source_find(source, "a", &independent, NULL));
+	pg_writer *writer = NULL;
+
+	ASSERT_EQ(PG_INVALID, pg_writer_open_unpack(target, independent,
+		&writer, NULL));
+	const size_t orders[][4] = {{0, 1, 2, 3}, {3, 2, 1, 0}, {2, 0, 3, 1}};
+
+	for (const auto &order : orders) {
+		for (size_t index : order) {
+			ASSERT_EQ(PG_OK, pg_writer_open_unpack(target,
+				files[index], &writer, NULL));
+			ASSERT_EQ(PG_OK, pg_writer_close(&writer, NULL));
+		}
+	}
+	ASSERT_EQ(PG_OK, pg_file_close(&independent, NULL));
+	for (pg_file *&file : files)
+		ASSERT_EQ(PG_OK, pg_file_close(&file, NULL));
+	ASSERT_EQ(PG_OK, pg_unpack_target_close(&target, NULL));
+	ASSERT_EQ(PG_OK, pg_cursor_close(&cursor, NULL));
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+}
+
 TEST_F(ApiStream, api_stream_coroutines)
 {
 	ASSERT_EQ(0, test_coroutines());
