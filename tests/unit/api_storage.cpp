@@ -65,10 +65,15 @@ TEST_F(ApiStorage, CompactVisibleWinners)
 	EXPECT_EQ(0, memcmp(header.data(), info.cached_header, header.size()));
 	char bytes[3];
 	size_t count;
+	pg_reader *reader = NULL;
+
+	EXPECT_STATUS(pg_reader_open(file, PG_READ_LOGICAL_PAYLOAD, &reader,
+		&error), PG_OK);
 	EXPECT_STATUS(
-		pg_file_read_all(file, bytes, sizeof(bytes), &count, &error),
+		pg_reader_read(reader, bytes, sizeof(bytes), &count, &error),
 		PG_OK);
 	EXPECT_EQ(0, memcmp(bytes, "new", 3));
+	EXPECT_STATUS(pg_reader_close(&reader, &error), PG_OK);
 	EXPECT_STATUS(pg_file_close(&file, &error), PG_OK);
 	EXPECT_STATUS(pg_source_close(&compacted, &error), PG_OK);
 	EXPECT_STATUS(

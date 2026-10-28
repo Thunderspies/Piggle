@@ -94,11 +94,15 @@ static int traverse(struct work *work)
 			PG_CHECK(!archive_header(&info));
 		status = pg_file_verify(file, &error);
 		PG_CHECK(readable(status) || status == PG_NO_CHECKSUM);
-		status = pg_file_read_all(
-			file, bytes, sizeof(bytes), &size, &error);
+		status = pg_reader_open(file, PG_READ_LOGICAL_PAYLOAD,
+			&reader, &error);
+		if (status == PG_OK)
+			status = pg_reader_read(reader, bytes, sizeof(bytes),
+				&size, &error);
 		PG_CHECK(readable(status));
 		if (status == PG_OK)
 			PG_CHECK(size == 3 && !memcmp(bytes, "old", 3));
+		PG_STATUS(pg_reader_close(&reader, &error), PG_OK);
 		PG_STATUS(pg_file_close(&file, &error), PG_OK);
 		status = pg_tree_read_all(work->tree, "a", bytes,
 			sizeof(bytes), &size, &error);

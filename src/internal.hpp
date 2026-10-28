@@ -464,6 +464,7 @@ pg_status pg_source_retain(pg_source *source);
 pg_status pg_source_release(pg_source *source, int *native_code);
 
 struct pg_reader {
+	pg_header_blob *header_blob;
 	pg_context *context;
 	pg_source *source;
 	pg_tree *watch_tree;

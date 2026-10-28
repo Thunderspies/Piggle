@@ -164,3 +164,33 @@ bounds, metadata validation and atomic publication. They do not decode or hash
 payloads. Checked operations keep their existing integrity behavior. This
 lets an application place acceptance at object acquisition rather than repeat
 it for every archive copy.
+
+## Resource headers and independent cache codecs
+
+Resource-header classification and prefix extraction are independent of archive
+storage. Exact extension recipes describe the supported legacy resource formats,
+and probing accepts a caller-supplied logical prefix and file length. The archive
+writer composes these primitives during its existing checked logical-data pass;
+standalone callers choose their own size limit. Automatic archive caching uses
+the legacy 2 MiB declared-length limit and rejects malformed lengths before
+publication. Explicit and suppressed policies keep caller intent representable.
+
+Inference uses logical bytes for every encoding. This avoids the original
+compression-dependent zero-word gate and accidental partial-extension matches.
+Only the eight extraction formats are eligible; `.wtex` and `.dcache` produce
+no inferred header.
+
+PIGG header pools and decoded HOGG DataLists have standalone opaque-span codecs.
+The codecs preserve IDs and holes without interpreting names or managing an
+archive. Their shared framing parser uses bounded read-at callbacks and visitors;
+their emitter uses span and sink callbacks. Archive adapters therefore reuse
+validation and serialization while retaining streaming writes, existing metadata
+ownership, DataList compression/digests, and journal replay.
+
+Ordinary logical readers follow the legacy cache lookup: a complete request
+contained in the cached prefix uses those bytes, while a crossing request reads
+the payload. Cached data remains opaque and trusted; EOF validation checks the
+underlying payload independently. The explicit payload-only logical mode makes
+verification and bulk transfer of actual content possible even when cached
+metadata differs. Reader-owned immutable header snapshots outlive selections,
+and decoder positions remain separate from positions advanced by cache reads.

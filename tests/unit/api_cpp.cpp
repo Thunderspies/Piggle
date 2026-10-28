@@ -106,6 +106,14 @@ CHECK_IMPORT(pg_tree_request_subtree);
 CHECK_IMPORT(pg_tree_rescan);
 CHECK_IMPORT(pg_tree_close);
 CHECK_IMPORT(pg_write_options_init);
+CHECK_IMPORT(pg_header_cache_classify);
+CHECK_IMPORT(pg_header_cache_probe);
+CHECK_IMPORT(pg_header_cache_extract);
+CHECK_IMPORT(pg_header_cache_decode);
+CHECK_IMPORT(pg_header_cache_count);
+CHECK_IMPORT(pg_header_cache_get);
+CHECK_IMPORT(pg_header_cache_encode);
+CHECK_IMPORT(pg_header_cache_close);
 
 #undef CHECK_IMPORT
 

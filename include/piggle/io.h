@@ -10,7 +10,8 @@ extern "C" {
 
 /* Open named visible content with one owned reader. Compose source_find,
  * reader_open and file_close; retain one selection, never retry/retarget.
- * representation is READ_LOGICAL, READ_STORED or READ_STORED_UNCHECKED.
+ * representation is READ_LOGICAL, READ_LOGICAL_PAYLOAD, READ_STORED or
+ * READ_STORED_UNCHECKED.
  * Same lookup,
  * staleness, metadata and verification rules as the selected-file reader.
  * out required, NULL until successful return after temporary cleanup.
@@ -36,10 +37,14 @@ PG_API pg_status PG_CALL pg_reader_open_tree(pg_tree *tree,
 		pg_error *error);
 
 /* Open independent reader at zero for captured physical copy.
- * READ_LOGICAL decodes; READ_STORED exposes its exact stored bytes. Both
- * validate available profile-selected digests at EOF; stored reads decode for
- * validation. READ_STORED_UNCHECKED returns exact stored bytes without
- * decoding or digest work, including at EOF; identity/bounds still checked.
+ * READ_LOGICAL trusts stored cached-header bytes for requests wholly within
+ * that prefix after clamping to logical EOF. Crossing requests read payload
+ * only; bytes are not compared against the payload. READ_LOGICAL_PAYLOAD
+ * always decodes the actual payload. READ_STORED exposes exact stored bytes.
+ * These modes validate available profile-selected payload digests at EOF;
+ * stored reads decode for validation. READ_STORED_UNCHECKED returns exact
+ * stored bytes without decoding or digest work, including at EOF;
+ * identity/bounds still checked.
  * Retains file/source. Changed identity -> STALE. Owned reader.
  * A tree-selected file starts name tracking while its reader is open if that
  * tree is still live and watching; tree close ends tracking, not reading.
@@ -71,8 +76,10 @@ PG_API pg_status PG_CALL pg_reader_inspect(pg_reader *reader,
  * serialization as read; never reselect a replaced file. Revalidate native
  * identity even for a no-op seek. Native failure -> close-only reader.
  * Compressed logical seeks use private bounded decoder checkpoints and may
- * decode forward; operational failure makes the reader close-only. Seeking
- * to EOF does not verify content: the next positive read verifies before END.
+ * decode forward. READ_LOGICAL seeks within a cached prefix defer payload
+ * decoding until needed. Operational failure makes the reader close-only.
+ * Seeking to EOF does not verify content: the next positive read verifies
+ * before END.
  * No returned storage, content mutation or change to other readers.
  */
 PG_API pg_status PG_CALL pg_reader_seek(pg_reader *reader,
@@ -90,7 +97,8 @@ PG_API pg_status PG_CALL pg_reader_tell(pg_reader *reader,
  * zero initially and exact on failure. Buffer/count borrow through return.
  * Zero capacity -> OK/0, no verification.
  * A completed positive-capacity read returns OK only with nonzero bytes.
- * Last nonempty read verifies before OK; next positive read -> END/0.
+ * Last nonempty read verifies payload before OK; cached bytes themselves
+ * remain trusted metadata. Next positive read -> END/0.
  * Empty files verify and return END/0 on the first positive read. Early
  * close makes no verification claim. Earlier chunks are provisional until
  * verified EOF: keep consumer effects reversible. Unchecked stored readers

@@ -275,10 +275,14 @@ TEST_F(ApiMetadata, LargeHoggInventoryRetainsNamesHeadersAndBytes)
 		EXPECT_EQ(0, memcmp(header, info.cached_header,
 			sizeof(header)));
 		if (i % 997 == 0 || i + 1 == entries) {
+			pg_reader *reader = NULL;
 			unsigned char bytes[sizeof(payload)];
 			size_t size = 0;
-			ASSERT_EQ(PG_OK, pg_file_read_all(file, bytes,
+			ASSERT_EQ(PG_OK, pg_reader_open(file,
+				PG_READ_LOGICAL_PAYLOAD, &reader, &error));
+			ASSERT_EQ(PG_OK, pg_reader_read(reader, bytes,
 				sizeof(bytes), &size, &error));
+			ASSERT_EQ(PG_OK, pg_reader_close(&reader, &error));
 			EXPECT_EQ(sizeof(payload), size);
 			EXPECT_EQ(0, memcmp(bytes, payload, size));
 		}
@@ -462,8 +466,12 @@ TEST_F(ApiMetadata, FailedTreeRefreshPreservesIncrementalHeaderSnapshots)
 	expect_header(&replacement, &second);
 	char bytes[3];
 	size_t count = 0;
-	ASSERT_EQ(PG_OK, pg_file_read_all(current, bytes, sizeof(bytes),
+	pg_reader *reader = NULL;
+	ASSERT_EQ(PG_OK, pg_reader_open(current, PG_READ_LOGICAL_PAYLOAD,
+		&reader, &error));
+	ASSERT_EQ(PG_OK, pg_reader_read(reader, bytes, sizeof(bytes),
 		&count, &error));
+	ASSERT_EQ(PG_OK, pg_reader_close(&reader, &error));
 	EXPECT_EQ(sizeof(bytes), count);
 	EXPECT_EQ(0, memcmp(bytes, "new", sizeof(bytes)));
 	ASSERT_EQ(PG_OK, pg_tree_close(&tree, &error));

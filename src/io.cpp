@@ -16,6 +16,7 @@ struct pg_archive_decoder {
 	zng_stream stream;
 	uint8_t input[65536];
 	uint64_t loaded;
+	uint64_t position;
 	int ended;
 	int indexed;
 	size_t checkpoint_count;
@@ -47,6 +48,7 @@ static int pg_decoder_copy(
 	to->stream.next_out = NULL;
 	to->stream.avail_out = 0;
 	to->loaded = from->loaded;
+	to->position = from->position;
 	to->ended = from->ended;
 	return Z_OK;
 }
@@ -66,13 +68,13 @@ static void pg_checkpoint_save(pg_reader *reader)
 	pg_archive_checkpoint **link;
 	pg_archive_checkpoint *checkpoint;
 
-	if (!decoder->indexed || !reader->position ||
-		reader->position % pg_checkpoint_interval ||
+	if (!decoder->indexed || !decoder->position ||
+		decoder->position % pg_checkpoint_interval ||
 		decoder->ended)
 		return;
 	for (link = &decoder->checkpoints; *link;
 		link = &(*link)->next) {
-		if ((*link)->position != reader->position)
+		if ((*link)->position != decoder->position)
 			continue;
 		checkpoint = *link;
 		*link = checkpoint->next;
@@ -88,7 +90,7 @@ static void pg_checkpoint_save(pg_reader *reader)
 		free(checkpoint);
 		return;
 	}
-	checkpoint->position = reader->position;
+	checkpoint->position = decoder->position;
 	checkpoint->next = decoder->checkpoints;
 	decoder->checkpoints = checkpoint;
 	if (decoder->checkpoint_count < pg_checkpoint_limit) {
@@ -118,8 +120,8 @@ static pg_status pg_decoder_reposition(
 				(*link)->position > (*best)->position))
 			best = link;
 	}
-	if (reader->position <= offset &&
-		(!best || (*best)->position <= reader->position))
+	if (decoder->position <= offset &&
+		(!best || (*best)->position <= decoder->position))
 		return PG_OK;
 	int result;
 
@@ -129,8 +131,6 @@ static pg_status pg_decoder_reposition(
 		zng_inflateEnd(&decoder->stream);
 		memset(&decoder->stream, 0, sizeof(decoder->stream));
 		result = pg_decoder_copy(decoder, &checkpoint->decoder);
-		if (result == Z_OK)
-			reader->position = checkpoint->position;
 		*best = checkpoint->next;
 		checkpoint->next = decoder->checkpoints;
 		decoder->checkpoints = checkpoint;
@@ -143,7 +143,7 @@ static pg_status pg_decoder_reposition(
 			decoder->stream.avail_out = 0;
 			decoder->loaded = 0;
 			decoder->ended = 0;
-			reader->position = 0;
+			decoder->position = 0;
 		}
 	}
 	return result == Z_OK
@@ -241,14 +241,14 @@ static pg_status pg_archive_read_decoded(
 	pg_archive_decoder *decoder =
 		(pg_archive_decoder *)reader->decoder;
 	uint64_t remaining_output =
-		reader->info.size - reader->position;
+		reader->info.size - decoder->position;
 	size_t limit = capacity < 65536 ? capacity : 65536;
 
 	if (limit > remaining_output)
 		limit = (size_t)remaining_output;
 	if (decoder->indexed) {
 		uint64_t boundary = pg_checkpoint_interval -
-			reader->position % pg_checkpoint_interval;
+			decoder->position % pg_checkpoint_interval;
 
 		if (limit > boundary)
 			limit = (size_t)boundary;
@@ -282,10 +282,10 @@ static pg_status pg_archive_read_decoded(
 		int result = zng_inflate(&decoder->stream, Z_NO_FLUSH);
 
 		*bytes = limit - decoder->stream.avail_out;
-		reader->position += *bytes;
+		decoder->position += *bytes;
 		if (result == Z_STREAM_END) {
 			decoder->ended = 1;
-			if (reader->position != reader->info.size ||
+			if (decoder->position != reader->info.size ||
 				decoder->stream.avail_in ||
 				decoder->loaded !=
 					reader->file_info.stored_size)
@@ -303,6 +303,28 @@ static pg_status pg_archive_read_decoded(
 			return PG_CORRUPT;
 	}
 	return PG_OK;
+}
+
+/* Reposition only the decoder, preserving the exposed reader cursor. */
+static pg_status pg_decoder_seek(pg_reader *reader, uint64_t offset)
+{
+	pg_archive_decoder *decoder =
+		(pg_archive_decoder *)reader->decoder;
+	pg_status status = pg_decoder_reposition(reader, offset);
+
+	while (status == PG_OK && decoder->position < offset) {
+		uint8_t scratch[65536];
+		uint64_t remaining = offset - decoder->position;
+		size_t amount = remaining < sizeof(scratch)
+			? (size_t)remaining : sizeof(scratch);
+		size_t count = 0;
+
+		status = pg_archive_read_decoded(
+			reader, scratch, amount, &count);
+		if (status == PG_OK)
+			pg_checkpoint_save(reader);
+	}
+	return status;
 }
 
 static pg_status pg_normalize_owned(
@@ -376,6 +398,9 @@ static pg_status pg_builder_options_check(
 	if (entry->compression > PG_COMPRESS_FORCE ||
 		entry->digest_kind > PG_DIGEST_MD5_32 ||
 		entry->expected_digest_domain > PG_CHECKSUM_STORED ||
+		entry->cached_header_policy > PG_HEADER_CACHE_EXPLICIT ||
+		(entry->cached_header_policy == PG_HEADER_CACHE_NONE &&
+			entry->cached_header_size) ||
 		(entry->cached_header_size && !entry->cached_header))
 		return PG_INVALID;
 	if (entry->cached_header_size > UINT32_MAX)
@@ -410,8 +435,72 @@ static void pg_writer_release_memory(pg_writer *writer)
 	free(writer);
 }
 
-static pg_status pg_writer_hash_raw(
-	pg_writer *writer, pg_md5 *hash, FILE *output)
+struct pg_header_capture {
+	uint8_t prefix[4];
+	size_t prefix_size;
+	int enabled;
+	int resolved;
+};
+
+/* Resolve from the first logical word, then retain only the cached prefix.
+ * This receives the same sequential chunks used for payload validation.
+ */
+static pg_status pg_writer_capture_header(pg_writer *writer,
+	pg_header_capture *capture, const uint8_t *data, size_t size,
+	uint64_t offset)
+{
+	if (!capture || !capture->enabled || !size)
+		return PG_OK;
+	if (!capture->resolved) {
+		size_t amount = sizeof(capture->prefix) - capture->prefix_size;
+
+		if (amount > size)
+			amount = size;
+		memcpy(capture->prefix + capture->prefix_size, data, amount);
+		capture->prefix_size += amount;
+		if (capture->prefix_size != sizeof(capture->prefix))
+			return PG_OK;
+		pg_header_cache_info info;
+		pg_status status = pg_header_cache_probe(writer->original_name,
+			capture->prefix, sizeof(capture->prefix),
+			writer->options.logical_size, &info, NULL);
+
+		if (status != PG_OK)
+			return status;
+		capture->resolved = 1;
+		if (!info.size) {
+			capture->enabled = 0;
+			return PG_OK;
+		}
+		if (info.recipe.mode != PG_HEADER_RECIPE_PREFIX &&
+			info.size - (uint32_t)info.recipe.adjustment >
+				2u * 1024 * 1024)
+			return PG_LIMIT;
+		writer->cached_header = malloc((size_t)info.size);
+		if (!writer->cached_header)
+			return PG_NOMEM;
+		writer->options.entry.cached_header = writer->cached_header;
+		writer->options.entry.cached_header_size = (size_t)info.size;
+		size_t initial = info.size < sizeof(capture->prefix)
+			? (size_t)info.size : sizeof(capture->prefix);
+
+		memcpy(writer->cached_header, capture->prefix, initial);
+	}
+	size_t length = writer->options.entry.cached_header_size;
+
+	if (offset < length) {
+		size_t amount = length - (size_t)offset;
+
+		if (amount > size)
+			amount = size;
+		memcpy((uint8_t *)writer->cached_header + (size_t)offset,
+			data, amount);
+	}
+	return PG_OK;
+}
+
+static pg_status pg_writer_hash_raw(pg_writer *writer, pg_md5 *hash,
+	FILE *output, pg_header_capture *capture)
 {
 	uint8_t bytes[65536];
 	uint64_t remaining = writer->options.logical_size;
@@ -425,6 +514,12 @@ static pg_status pg_writer_hash_raw(
 
 		if (fread(bytes, 1, amount, writer->input) != amount)
 			return PG_IO;
+		pg_status status = pg_writer_capture_header(writer, capture,
+			bytes, amount,
+			writer->options.logical_size - remaining);
+
+		if (status != PG_OK)
+			return status;
 		pg_md5_update(hash, bytes, amount);
 		if (output &&
 			fwrite(bytes, 1, amount, output) != amount)
@@ -435,7 +530,8 @@ static pg_status pg_writer_hash_raw(
 }
 
 static pg_status pg_writer_verify_zlib(
-	pg_writer *writer, pg_md5 *hash, FILE *output_file)
+	pg_writer *writer, pg_md5 *hash, FILE *output_file,
+	pg_header_capture *capture)
 {
 	zng_stream stream = {};
 	uint8_t input[65536];
@@ -475,6 +571,10 @@ static pg_status pg_writer_verify_zlib(
 				status = PG_CORRUPT;
 				break;
 			}
+			status = pg_writer_capture_header(writer, capture,
+				output, produced, decoded);
+			if (status != PG_OK)
+				break;
 			pg_md5_update(hash, output, produced);
 			if (output_file &&
 				fwrite(output, 1, produced,
@@ -611,6 +711,12 @@ static pg_status pg_writer_stage(pg_writer *writer)
 	off_t offset = 0;
 	uint8_t bytes[65536];
 	uint64_t remaining;
+	pg_header_capture capture = {};
+
+	capture.enabled = writer->options.entry.cached_header_policy ==
+			PG_HEADER_CACHE_AUTO &&
+		!writer->options.entry.cached_header_size &&
+		writer->options.logical_size >= 4;
 
 	if (writer->accepted != writer->options.input_size)
 		return PG_INVALID;
@@ -622,9 +728,11 @@ static pg_status pg_writer_stage(pg_writer *writer)
 	} else {
 		pg_md5_init(&hash);
 		if (writer->options.encoding == PG_ZLIB)
-			status = pg_writer_verify_zlib(writer, &hash, NULL);
+			status = pg_writer_verify_zlib(writer, &hash, NULL,
+				&capture);
 		else
-			status = pg_writer_hash_raw(writer, &hash, NULL);
+			status = pg_writer_hash_raw(writer, &hash, NULL,
+				&capture);
 		if (status != PG_OK)
 			return status;
 		pg_md5_finish(&hash, digest);
@@ -852,8 +960,8 @@ static pg_status pg_writer_native_stage_locked(
 	}
 	pg_md5_init(&hash);
 	status = writer->options.encoding == PG_ZLIB
-		? pg_writer_verify_zlib(writer, &hash, out)
-		: pg_writer_hash_raw(writer, &hash, out);
+		? pg_writer_verify_zlib(writer, &hash, out, NULL)
+		: pg_writer_hash_raw(writer, &hash, out, NULL);
 	if (status != PG_OK)
 		goto close_output;
 	pg_md5_finish(&hash, digest);
@@ -998,7 +1106,7 @@ PG_API pg_status PG_CALL pg_reader_open_source(pg_source *source,
 	if (!out)
 		return pg_result(PG_INVALID, error);
 	*out = NULL;
-	if (!source || !name || representation > PG_READ_STORED_UNCHECKED)
+	if (!source || !name || representation > PG_READ_LOGICAL_PAYLOAD)
 		return pg_result(PG_INVALID, error);
 	status = pg_source_find(source, name, &file, &work_error);
 	if (status != PG_OK) {
@@ -1036,7 +1144,7 @@ PG_API pg_status PG_CALL pg_reader_open_tree(pg_tree *tree,
 	if (!out)
 		return pg_result(PG_INVALID, error);
 	*out = NULL;
-	if (!tree || !name || representation > PG_READ_STORED_UNCHECKED)
+	if (!tree || !name || representation > PG_READ_LOGICAL_PAYLOAD)
 		return pg_result(PG_INVALID, error);
 	status = pg_tree_find(tree, name, &file, &work_error);
 	if (status != PG_OK) {
@@ -1098,18 +1206,23 @@ static pg_status pg_reader_open_locked(pg_file *file,
 #endif
 	pg_status status = PG_OK;
 	int native_code = 0;
+	int logical = representation == PG_READ_LOGICAL ||
+		representation == PG_READ_LOGICAL_PAYLOAD;
 	int fd;
 
 	if (!out)
 		return pg_result(PG_INVALID, error);
 	*out = NULL;
-	if (!file || !file->source || representation > PG_READ_STORED_UNCHECKED)
+	if (!file || !file->source ||
+		representation > PG_READ_LOGICAL_PAYLOAD)
 		return pg_result(PG_INVALID, error);
 	if (file->source->recovery_required)
 		return pg_result(PG_RECOVERY_REQUIRED, error);
 	if (file->source->stale)
 		return pg_result(PG_STALE, error);
 	if (pg_atomic_load(&file->source->live_readers) == SIZE_MAX)
+		return pg_result(PG_LIMIT, error);
+	if (file->header_blob && file->header_blob->references == SIZE_MAX)
 		return pg_result(PG_LIMIT, error);
 	if (file->source->format == PG_LOOSE) {
 		status = pg_reader_open_native(file->source->context,
@@ -1176,8 +1289,7 @@ static pg_status pg_reader_open_locked(pg_file *file,
 		close(fd);
 		return pg_native_result(status, native_code, error);
 	}
-	if (representation == PG_READ_LOGICAL &&
-		file->info.encoding == PG_ZLIB) {
+	if (logical && file->info.encoding == PG_ZLIB) {
 		pg_archive_decoder *decoder =
 			(pg_archive_decoder *)calloc(
 				1, sizeof(*decoder));
@@ -1222,16 +1334,17 @@ static pg_status pg_reader_open_locked(pg_file *file,
 	reader->fd = fd;
 	reader->identity = opened;
 	reader->file_info = file->info;
+	reader->header_blob = file->header_blob;
+	if (reader->header_blob)
+		++reader->header_blob->references;
 	reader->payload_offset = payload_offset;
 	reader->representation = representation;
-	reader->info.size = representation != PG_READ_LOGICAL
-		? file->info.stored_size
-		: file->info.logical_size;
+	reader->info.size = logical ? file->info.logical_size
+		: file->info.stored_size;
 	reader->info.logical_size = file->info.logical_size;
 	reader->info.mtime = file->info.mtime;
-	reader->info.encoding = representation != PG_READ_LOGICAL
-		? file->info.encoding
-		: (uint32_t)PG_LOGICAL;
+	reader->info.encoding = logical ? (uint32_t)PG_LOGICAL
+		: file->info.encoding;
 	*out = reader;
 	return pg_result(PG_OK, error);
 }
@@ -1388,9 +1501,38 @@ static pg_status pg_reader_read_locked(pg_reader *reader, void *buffer,
 		}
 		return pg_result(PG_END, error);
 	}
-	if (archive && reader->decoder) {
+	/* Test the complete request before payload decoder chunk limits. */
+	uint64_t available = reader->info.size - reader->position;
+	size_t requested = available < capacity ? (size_t)available : capacity;
+	int cached = archive && reader->representation == PG_READ_LOGICAL &&
+		reader->file_info.cached_header &&
+		reader->position <= reader->file_info.cached_header_size &&
+		requested <= reader->file_info.cached_header_size -
+			reader->position;
+
+	if (cached) {
+		const uint8_t *header =
+			(const uint8_t *)reader->file_info.cached_header;
+
+		memcpy(buffer, header + reader->position, requested);
+		*bytes = requested;
+		reader->position += requested;
+	} else if (archive && reader->decoder) {
+		pg_archive_decoder *decoder =
+			(pg_archive_decoder *)reader->decoder;
+
+		if (decoder->position != reader->position) {
+			decoder->indexed = 1;
+			status = pg_decoder_seek(reader, reader->position);
+			if (status != PG_OK) {
+				reader->failed = 1;
+				return pg_result(status, error);
+			}
+		}
 		status = pg_archive_read_decoded(
 			reader, buffer, capacity, bytes);
+		reader->position =
+			((pg_archive_decoder *)reader->decoder)->position;
 		if (status != PG_OK) {
 			reader->failed = 1;
 			return pg_result(status, error);
@@ -1464,7 +1606,9 @@ static pg_status pg_reader_seek_locked(
 		return pg_native_result(status, native_code, error);
 	}
 	/* Seek directly or restore/replay a decoder checkpoint. */
-	if (!reader->decoder) {
+	if (!reader->decoder ||
+		(reader->representation == PG_READ_LOGICAL &&
+			offset <= reader->file_info.cached_header_size)) {
 		reader->position = offset;
 		return pg_result(PG_OK, error);
 	}
@@ -1476,20 +1620,8 @@ static pg_status pg_reader_seek_locked(
 		reader->position = offset;
 		return pg_result(PG_OK, error);
 	}
-	status = pg_decoder_reposition(reader, offset);
-	while (status == PG_OK && reader->position < offset) {
-		uint8_t scratch[65536];
-		uint64_t remaining = offset - reader->position;
-		size_t amount = remaining < sizeof(scratch)
-			? (size_t)remaining
-			: sizeof(scratch);
-		size_t count = 0;
-
-		status = pg_archive_read_decoded(
-			reader, scratch, amount, &count);
-		if (status == PG_OK)
-			pg_checkpoint_save(reader);
-	}
+	status = pg_decoder_seek(reader, offset);
+	reader->position = decoder->position;
 	if (status == PG_OK)
 		status = pg_reader_native_check(reader, &native_code);
 	if (status != PG_OK)
@@ -1564,6 +1696,7 @@ PG_API pg_status PG_CALL pg_reader_close(
 				owned->watch_tree, owned->watch_scope);
 			pg_tree_release(owned->watch_tree);
 		}
+		pg_header_release(owned->header_blob, NULL);
 		free(owned->native_path);
 		free(owned);
 		return pg_native_result(
@@ -1990,7 +2123,11 @@ static pg_status pg_writer_open_native_for_source_coordinated(
 		options->entry.compression > PG_COMPRESS_FORCE ||
 		options->entry.digest_kind > PG_DIGEST_MD5_32 ||
 		options->entry.expected_digest_domain >
-			PG_CHECKSUM_STORED)
+			PG_CHECKSUM_STORED ||
+		options->entry.cached_header_policy >
+			PG_HEADER_CACHE_EXPLICIT ||
+		(options->entry.cached_header_policy == PG_HEADER_CACHE_NONE &&
+			options->entry.cached_header_size))
 		return pg_result(PG_INVALID, error);
 	if (options->entry.compression == PG_COMPRESS_FORCE ||
 		options->entry.cached_header_size ||
@@ -2655,6 +2792,7 @@ PG_API pg_status PG_CALL pg_writer_open_archive_builder_stored(
 	checked.entry.original_name = options->original_name;
 	checked.entry.cached_header = options->cached_header;
 	checked.entry.cached_header_size = options->cached_header_size;
+	checked.entry.cached_header_policy = PG_HEADER_CACHE_EXPLICIT;
 	pg_status status = pg_writer_open_archive_builder(builder, name,
 		&checked, out, error);
 

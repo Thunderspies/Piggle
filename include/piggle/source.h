@@ -111,7 +111,8 @@ PG_API pg_status PG_CALL pg_source_write_all(pg_source *destination,
 
 /* Native reader -> source writer -> validated finish. Preserve native mtime;
  * normalize virtual name, keep native spelling. Explicit destination;
- * input aliasing replacement target -> CONFLICT. No cached header.
+ * input aliasing replacement target -> CONFLICT. Infer supported headers
+ * for archives; loose output has no cached header.
  * Same hierarchy checks as source_write_all; no hidden mutation.
  * All caller storage is borrowed through return.
  */
@@ -122,8 +123,9 @@ PG_API pg_status PG_CALL pg_source_import(
 		uint32_t compression,
 		pg_error *error);
 
-/* Selected logical reader -> source writer. Preserve timestamp; retain
- * cached header for archives, omit it for loose output. Use canonical name
+/* Selected payload reader -> source writer. Preserve timestamp; retain
+ * cached header for archive inputs, infer for loose-to-archive copies, and
+ * omit it for loose output. Use canonical name
  * for additions and preserve existing original name for replacements.
  * Same hierarchy checks as source_write_all; no hidden mutation.
  * Reject input aliasing replacement copy; validate before publication.
