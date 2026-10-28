@@ -25,8 +25,51 @@ static int pg_directory_compare(const void *left, const void *right)
 }
 
 pg_status pg_indexed_directories(pg_source **sources, size_t count,
-	const char *prefix, const char ***out, size_t *size)
+	const char *prefix, int recursive, const char ***out, size_t *size)
 {
+	if (!recursive) {
+		size_t total = 0;
+
+		*out = NULL;
+		*size = 0;
+		for (size_t i = 0; i < count; i++) {
+			pg_source_child *children;
+			size_t child_count;
+			pg_status status = pg_source_children_scope(sources[i],
+				prefix, &children, &child_count);
+
+			if (status != PG_OK)
+				return status;
+			for (size_t j = 0; j < child_count; j++)
+				if (pg_source_child_directory(children + j)) {
+					if (total == SIZE_MAX / sizeof(**out))
+						return PG_LIMIT;
+					total++;
+				}
+		}
+		const char **names = (const char **)malloc(
+			(total ? total : 1) * sizeof(*names));
+
+		if (!names)
+			return PG_NOMEM;
+		for (size_t i = 0; i < count; i++) {
+			pg_source_child *children;
+			size_t child_count;
+			pg_status status = pg_source_children_scope(sources[i],
+				prefix, &children, &child_count);
+
+			if (status != PG_OK) {
+				free(names);
+				return status;
+			}
+			for (size_t j = 0; j < child_count; j++)
+				if (pg_source_child_directory(children + j))
+					names[(*size)++] = children[j].name;
+		}
+		qsort(names, total, sizeof(*names), pg_directory_compare);
+		*out = names;
+		return PG_OK;
+	}
 	size_t total = 0;
 
 	*out = NULL;
@@ -181,6 +224,35 @@ static pg_status pg_entry_directories(pg_entry_cursor *cursor,
 	pg_source *source, size_t rank, const char *prefix,
 	uint32_t flags)
 {
+	if (!(flags & PG_ENTRIES_RECURSIVE)) {
+		pg_source_child *children;
+		size_t count;
+		pg_status status = pg_source_children_scope(source, prefix,
+			&children, &count);
+
+		for (size_t i = 0; status == PG_OK && i < count; i++) {
+			pg_source_child *child = children + i;
+			pg_source_record *r = child->record;
+			int explicit_entry = r && S_ISDIR(r->identity.st_mode);
+
+			if (!child->descendants && !explicit_entry)
+				continue;
+			pg_entry_info info = {};
+
+			info.kind = PG_ENTRY_DIRECTORY;
+			info.source_id = source->id;
+			info.canonical_name = child->name;
+			info.original_name = explicit_entry
+				? r->info.original_name : child->name;
+			info.attributes = explicit_entry ? r->attributes :
+				PG_ENTRY_IMPLIED | (source->access == PG_READ
+					? PG_ENTRY_READ_ONLY : 0);
+			info.mtime = explicit_entry ? r->info.mtime : 0;
+			status = pg_entry_add(cursor, &info, NULL, rank,
+				explicit_entry);
+		}
+		return status;
+	}
 	pg_source_record **records;
 	size_t count;
 	pg_status status = pg_source_records_scope(

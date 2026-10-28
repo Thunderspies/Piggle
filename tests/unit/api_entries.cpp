@@ -422,6 +422,68 @@ static int shallow(void)
 
 using ApiEntries = piggle_test::ContractTest;
 
+TEST_F(ApiEntries, ShallowOverlayKeepsPunctuationAndDirectoryPrecedence)
+{
+	pg_context *context = NULL;
+	pg_tree *tree = NULL;
+	pg_source *sources[2] = {};
+	pg_archive_builder *builder = NULL;
+	pg_entry_cursor *cursor = NULL;
+
+	ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+	ASSERT_EQ(PG_OK, pg_tree_create(context, &tree, NULL));
+	for (int rank = 0; rank < 2; rank++) {
+		const char *path = rank ? "upper.hogg" : "lower.hogg";
+
+		ASSERT_EQ(PG_OK, pg_archive_builder_create(context, path,
+			PG_HOGG10, 0, &builder, NULL));
+		const char *names[] = {"a", "a!", "a-", "a.", "a/deep/leaf"};
+
+		for (size_t i = 0; i < (rank ? 4u : 5u); i++)
+			ASSERT_EQ(PG_OK, pg_archive_builder_write_all(builder,
+				names[i], payload, sizeof(payload), NULL,
+				NULL));
+		ASSERT_EQ(PG_OK, pg_archive_builder_finish(builder, NULL));
+		ASSERT_EQ(PG_OK, pg_archive_builder_close(&builder, NULL));
+		pg_source_options options = {PG_HOGG10, PG_WRITE, 0};
+
+		ASSERT_EQ(PG_OK, pg_source_open(context, path, &options,
+			&sources[rank], NULL));
+		ASSERT_EQ(PG_OK, pg_tree_attach(tree, sources[rank], NULL));
+	}
+	ASSERT_EQ(PG_OK, pg_tree_entries(tree, NULL, 0, &cursor, NULL));
+	ASSERT_EQ(0, next(cursor, "a", PG_ENTRY_DIRECTORY, 1));
+	for (const char *name : {"a!", "a-", "a."})
+		ASSERT_EQ(0, next(cursor, name, PG_ENTRY_FILE, 0));
+	ASSERT_EQ(0, end(cursor));
+	ASSERT_EQ(PG_OK, pg_entry_cursor_close(&cursor, NULL));
+	pg_file *leaf = NULL;
+
+	ASSERT_EQ(PG_OK, pg_source_find(sources[0], "a/deep/leaf", &leaf,
+		NULL));
+	ASSERT_EQ(PG_OK, pg_file_delete(leaf, NULL));
+	ASSERT_EQ(PG_OK, pg_file_close(&leaf, NULL));
+	ASSERT_EQ(PG_OK, pg_tree_entries(tree, NULL, 0, &cursor, NULL));
+	for (const char *name : {"a", "a!", "a-", "a."})
+		ASSERT_EQ(0, next(cursor, name, PG_ENTRY_FILE, 0));
+	ASSERT_EQ(0, end(cursor));
+	ASSERT_EQ(PG_OK, pg_entry_cursor_close(&cursor, NULL));
+	ASSERT_EQ(PG_OK, pg_source_find(sources[0], "a", &leaf, NULL));
+	ASSERT_EQ(PG_OK, pg_file_delete(leaf, NULL));
+	ASSERT_EQ(PG_OK, pg_file_close(&leaf, NULL));
+	ASSERT_EQ(PG_OK, pg_source_write_all(sources[0], "a/new", payload,
+		sizeof(payload), NULL, NULL));
+	ASSERT_EQ(PG_OK, pg_source_rescan(sources[0], NULL));
+	ASSERT_EQ(PG_OK, pg_tree_entries(tree, "a", 0, &cursor, NULL));
+	ASSERT_EQ(0, next(cursor, "a/new", PG_ENTRY_FILE, 0));
+	ASSERT_EQ(0, end(cursor));
+	ASSERT_EQ(PG_OK, pg_entry_cursor_close(&cursor, NULL));
+	ASSERT_EQ(PG_OK, pg_tree_close(&tree, NULL));
+	for (pg_source *&source : sources)
+		ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+}
+
 TEST_F(ApiEntries, api_entries_loose)
 {
 	ASSERT_EQ(0, loose_case(0));
