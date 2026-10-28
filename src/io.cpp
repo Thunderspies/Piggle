@@ -2576,16 +2576,24 @@ PG_API pg_status PG_CALL pg_writer_open_unpack(pg_unpack_target *target,
 		return pg_result(PG_INVALID, error);
 	if (target->live_writers == SIZE_MAX)
 		return pg_result(PG_LIMIT, error);
-	for (i = 0; i < target->count; i++) {
-		if (target->items[i].selection == file &&
-			target->items[i].source == file->source &&
-			target->items[i].copy_id ==
-				file->info.copy_id &&
-			target->items[i].copy_generation ==
-				file->info.copy_generation)
-			break;
+	size_t high = target->count;
+
+	for (i = 0; i < high;) {
+		size_t middle = i + (high - i) / 2;
+		int order = strcmp(target->items[middle].name,
+			file->info.canonical_name);
+
+		if (order < 0)
+			i = middle + 1;
+		else
+			high = middle;
 	}
-	if (i == target->count)
+	if (i == target->count ||
+		strcmp(target->items[i].name, file->info.canonical_name) ||
+		target->items[i].selection != file ||
+		target->items[i].source != file->source ||
+		target->items[i].copy_id != file->info.copy_id ||
+		target->items[i].copy_generation != file->info.copy_generation)
 		return pg_result(PG_INVALID, error);
 	status = pg_unpack_root_check(target, &native_code);
 	if (status != PG_OK)
