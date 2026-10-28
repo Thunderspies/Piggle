@@ -506,7 +506,7 @@ PG_API pg_status PG_CALL pg_archive_builder_copy(
 				input->info.stored_size <
 					input->info.logical_size));
 	status = pg_reader_open(input,
-		stored ? PG_READ_STORED : PG_READ_LOGICAL, &reader,
+		stored ? PG_READ_STORED : PG_READ_LOGICAL_PAYLOAD, &reader,
 		error);
 	if (status != PG_OK)
 		return status;
@@ -519,6 +519,8 @@ PG_API pg_status PG_CALL pg_archive_builder_copy(
 	options.entry.cached_header = input->info.cached_header;
 	options.entry.cached_header_size =
 		input->info.cached_header_size;
+	if (input->source->format != PG_LOOSE)
+		options.entry.cached_header_policy = PG_HEADER_CACHE_EXPLICIT;
 	if (stored) {
 		uint8_t zero[16] = {};
 		size_t digest_size =

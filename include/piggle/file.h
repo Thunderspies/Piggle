@@ -38,6 +38,8 @@ PG_API void PG_CALL pg_buffer_free(pg_buffer *buffer);
 
 /* Read entire selected logical file from zero into caller storage, verified
  * through EOF even when empty. bytes required; NULL allowed only at capacity=0.
+ * Uses READ_LOGICAL cache selection; EOF verifies the payload independently
+ * of trusted cached bytes. Use a READ_LOGICAL_PAYLOAD reader to bypass caches.
  * Zero capacity also accepts non-NULL storage without accessing it.
  * Size>SIZE_MAX -> LIMIT; too small -> CAPACITY, untouched buffer/bytes=0.
  * Other failures may deliver a prefix: discard it. No NUL terminator or
@@ -76,7 +78,7 @@ PG_API pg_status PG_CALL pg_file_write_all(pg_file *file,
 		const void *buffer, size_t size, const pg_entry_options *entry,
 		pg_error *error);
 
-/* Selected logical reader -> native writer -> validated finish. Preserve
+/* Selected payload reader -> native writer -> validated finish. Preserve
  * mtime; flags=0 exclusive, OVERWRITE permits replacing regular files.
  * Reject aliases into retained source data, links and native races.
  * Checksum failure never publishes destination.

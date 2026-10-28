@@ -3,6 +3,7 @@
 
 #include "internal.hpp"
 #include "digest.hpp"
+#include "header_cache_internal.hpp"
 
 #include <zlib-ng.h>
 
@@ -106,6 +107,47 @@ static inline void pg_pool_free(pg_pool_value *values, uint32_t count)
 	free(values);
 }
 
+struct pg_pool_frame {
+	const uint8_t *bytes;
+	uint64_t size;
+	pg_pool_value *values;
+	int names;
+	int copy;
+};
+
+static inline pg_status pg_pool_frame_read(void *state, uint64_t offset,
+	void *out, size_t size)
+{
+	pg_pool_frame *frame = (pg_pool_frame *)state;
+
+	if (offset > frame->size || size > frame->size - offset)
+		return PG_CORRUPT;
+	if (size)
+		memcpy(out, frame->bytes + (size_t)offset, size);
+	return PG_OK;
+}
+
+static inline pg_status pg_pool_frame_visit(void *state, uint32_t id,
+	uint64_t offset, uint32_t size)
+{
+	pg_pool_frame *frame = (pg_pool_frame *)state;
+	const uint8_t *data = frame->bytes + (size_t)offset;
+
+	if (frame->names && (!size || data[size - 1] != '\0' ||
+		memchr(data, '\0', size - 1)))
+		return PG_CORRUPT;
+	if (size && frame->copy) {
+		frame->values[id].data = malloc(size);
+		if (!frame->values[id].data)
+			return PG_NOMEM;
+		memcpy(frame->values[id].data, data, size);
+	} else {
+		frame->values[id].data = size ? (void *)data : NULL;
+	}
+	frame->values[id].size = size;
+	return PG_OK;
+}
+
 static inline pg_status pg_pigg_pool(pg_source *source, uint64_t offset,
 		uint32_t expected_magic, int names, pg_pool_value **values_out,
 		uint32_t *count_out, uint64_t *end_out)
@@ -113,9 +155,7 @@ static inline pg_status pg_pigg_pool(pg_source *source, uint64_t offset,
 	uint8_t header[12];
 	uint64_t file_size = (uint64_t)source->identity.st_size;
 	uint64_t end;
-	size_t cursor = 0;
 	uint32_t count;
-	uint32_t i;
 	uint32_t bytes_size;
 	uint8_t *bytes;
 	pg_pool_value *values;
@@ -137,11 +177,16 @@ static inline pg_status pg_pigg_pool(pg_source *source, uint64_t offset,
 	if (count > SIZE_MAX / sizeof(*values))
 		return PG_CORRUPT;
 #endif
-	bytes = (uint8_t *)malloc(bytes_size ? bytes_size : 1);
+	uint64_t pool_size = sizeof(header) + (uint64_t)bytes_size;
+
+	if (pool_size > SIZE_MAX)
+		return PG_LIMIT;
+	bytes = (uint8_t *)malloc((size_t)pool_size);
 	if (!bytes)
 		return PG_NOMEM;
+	memcpy(bytes, header, sizeof(header));
 	status = pg_read_span(source->fd, file_size,
-		offset + sizeof(header), bytes, bytes_size);
+		offset + sizeof(header), bytes + sizeof(header), bytes_size);
 	if (status != PG_OK) {
 		free(bytes);
 		return status;
@@ -152,43 +197,14 @@ static inline pg_status pg_pigg_pool(pg_source *source, uint64_t offset,
 		free(bytes);
 		return PG_NOMEM;
 	}
-	for (i = 0; i < count; i++) {
-		uint32_t size;
+	pg_pool_frame frame = {bytes, pool_size, values, names, 1};
+	uint32_t parsed_count = 0;
 
-		if (cursor > bytes_size || bytes_size - cursor < 4) {
-			status = PG_CORRUPT;
-			goto fail;
-		}
-		size = pg_read_u32(bytes + cursor);
-		cursor += 4;
-		if (size > bytes_size - cursor || (names && !size)) {
-			status = PG_CORRUPT;
-			goto fail;
-		}
-		values[i].size = size;
-		if (size) {
-			values[i].data = malloc(size);
-			if (!values[i].data) {
-				status = PG_NOMEM;
-				goto fail;
-			}
-			memcpy(values[i].data, bytes + cursor, size);
-		}
-		if (names) {
-			const char *name = (const char *)values[i].data;
-
-			if (name[size - 1] != '\0' ||
-				memchr(name, '\0', size - 1)) {
-				status = PG_CORRUPT;
-				goto fail;
-			}
-		}
-		cursor += size;
-	}
-	if (cursor != bytes_size) {
-		status = PG_CORRUPT;
+	status = pg_cache_frame_parse(PG_HEADER_CACHE_PIGG_POOL,
+		expected_magic, pool_size, pg_pool_frame_read, &frame,
+		pg_pool_frame_visit, &frame, &parsed_count);
+	if (status != PG_OK)
 		goto fail;
-	}
 	free(bytes);
 	*values_out = values;
 	*count_out = count;
@@ -363,12 +379,12 @@ static inline pg_status pg_hogg_data(pg_source *source,
 	uint32_t unpacked_size;
 	uint32_t ea_id;
 	uint32_t count;
-	uint32_t i;
 	uint64_t payload_offset;
-	uint64_t cursor;
 	pg_status status;
 	pg_md5 hash;
 	uint8_t digest[16];
+	pg_pool_frame frame = {};
+	uint32_t parsed_count = 0;
 
 	if (data_file == UINT32_MAX)
 		return PG_OK;
@@ -465,29 +481,14 @@ static inline pg_status pg_hogg_data(pg_source *source,
 		status = PG_NOMEM;
 		goto fail;
 	}
-	cursor = 8;
-	for (i = 0; i < count; i++) {
-		uint32_t size;
-
-		if (cursor > stored_size || stored_size - cursor < 4) {
-			status = PG_CORRUPT;
-			goto fail;
-		}
-		size = pg_read_u32(bytes + cursor);
-
-		cursor += 4;
-		if (size > stored_size - cursor) {
-			status = PG_CORRUPT;
-			goto fail;
-		}
-		slots[i].data = bytes + cursor;
-		slots[i].size = size;
-		cursor += size;
-	}
-	if (cursor != stored_size) {
-		status = PG_CORRUPT;
+	frame.bytes = bytes;
+	frame.size = stored_size;
+	frame.values = slots;
+	status = pg_cache_frame_parse(PG_HEADER_CACHE_HOGG_DATALIST, 0,
+		stored_size, pg_pool_frame_read, &frame, pg_pool_frame_visit,
+		&frame, &parsed_count);
+	if (status != PG_OK)
 		goto fail;
-	}
 	*bytes_out = bytes;
 	*slots_out = slots;
 	*count_out = count;

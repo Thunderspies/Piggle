@@ -5,6 +5,9 @@
 
 namespace piggle
 {
+using ::PG_HEADER_CACHE_AUTO;
+using ::PG_HEADER_CACHE_NONE;
+using ::PG_HEADER_CACHE_EXPLICIT;
 using ::PG_CHECKSUM_LOGICAL;
 using ::PG_CHECKSUM_STORED;
 using ::pg_archive_build_options;
@@ -88,6 +91,7 @@ using ::PG_OVERWRITE;
 using ::PG_PIGG2;
 using ::PG_READ;
 using ::PG_READ_LOGICAL;
+using ::PG_READ_LOGICAL_PAYLOAD;
 using ::PG_READ_ONLY;
 using ::PG_READ_STORED;
 using ::PG_RECOVERY_REQUIRED;

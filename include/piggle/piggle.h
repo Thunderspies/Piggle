@@ -7,4 +7,5 @@
 #include <piggle/archive_builder.h>
 #include <piggle/change.h>
 #include <piggle/entries.h>
+#include <piggle/header_cache.h>
 #endif

@@ -8,4 +8,5 @@
 #include <piggle/archive_builder.hpp>
 #include <piggle/change.hpp>
 #include <piggle/entries.hpp>
+#include <piggle/header_cache.hpp>
 #endif

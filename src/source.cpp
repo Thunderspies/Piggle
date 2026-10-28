@@ -590,7 +590,7 @@ pg_status pg_unpack_cursor(pg_cursor *cursor, pg_context *context,
 		if (status != PG_OK)
 			break;
 		status = pg_reader_open(
-			file, PG_READ_LOGICAL, &reader, &work_error);
+			file, PG_READ_LOGICAL_PAYLOAD, &reader, &work_error);
 		if (status == PG_OK)
 			status = pg_writer_open_unpack(
 				target, file, &writer, &work_error);
@@ -2823,6 +2823,36 @@ static pg_status pg_source_hogg_delete_locked(
 		source, frame, sizeof(frame), error);
 }
 
+struct pg_source_frame {
+	const pg_pool_value *slots;
+	uint8_t *bytes;
+	size_t size;
+	size_t at;
+};
+
+static pg_status pg_source_frame_span(void *state, uint32_t index,
+	pg_header_cache_span *out)
+{
+	pg_source_frame *frame = (pg_source_frame *)state;
+
+	out->data = frame->slots[index].data;
+	out->size = frame->slots[index].size;
+	return PG_OK;
+}
+
+static pg_status pg_source_frame_write(void *state, const void *data,
+	size_t size)
+{
+	pg_source_frame *frame = (pg_source_frame *)state;
+
+	if (size > frame->size - frame->at)
+		return PG_LIMIT;
+	if (size)
+		memcpy(frame->bytes + frame->at, data, size);
+	frame->at += size;
+	return PG_OK;
+}
+
 static pg_status pg_source_hogg_fold(pg_source *source,
 	const pg_builder_entry *pending, int new_name, uint32_t *name_id,
 	uint32_t *header_id, pg_error *error)
@@ -2831,7 +2861,7 @@ static pg_status pg_source_hogg_fold(pg_source *source,
 	uint8_t *base = NULL, *journal = NULL, *packed = NULL;
 	pg_pool_value *slots = NULL;
 	uint64_t table, ea_base, journal_at, metadata_end, offset;
-	uint32_t files, eas, dl_file, count = 0, selected, i, at;
+	uint32_t files, eas, dl_file, count = 0, selected, at;
 	uint32_t extra;
 	uint32_t dl_ea;
 	uint8_t ea[16];
@@ -2840,6 +2870,7 @@ static pg_status pg_source_hogg_fold(pg_source *source,
 	uint8_t digest[16];
 	pg_status status;
 	int native_code = 0;
+	pg_source_frame packed_frame = {};
 
 	status = pg_read_span(source->fd, source->identity.st_size, 0,
 		header, sizeof(header));
@@ -2958,30 +2989,27 @@ static pg_status pg_source_hogg_fold(pg_source *source,
 				(uint32_t)pending->cached_header_size;
 		}
 	}
-	for (i = 0; i < count; i++) {
-		packed_size += 4 + slots[i].size;
-		if (packed_size > UINT32_MAX) {
-			status = PG_LIMIT;
-			goto done;
-		}
+	packed_frame.slots = slots;
+	status = pg_cache_frame_measure(PG_HEADER_CACHE_HOGG_DATALIST, 0,
+		count, pg_source_frame_span, &packed_frame, &packed_size);
+	if (status != PG_OK)
+		goto done;
+	if (packed_size > UINT32_MAX || packed_size > SIZE_MAX) {
+		status = PG_LIMIT;
+		goto done;
 	}
 	packed = (uint8_t *)malloc((size_t)packed_size);
 	if (!packed) {
 		status = PG_NOMEM;
 		goto done;
 	}
-	pg_wire_u32(packed, 0);
-	pg_wire_u32(packed + 4, count);
-	at = 8;
-	for (i = 0; i < count; i++) {
-		pg_wire_u32(packed + at, slots[i].size);
-		at += 4;
-		if (slots[i].size) {
-			memcpy(packed + at, slots[i].data,
-				slots[i].size);
-			at += slots[i].size;
-		}
-	}
+	packed_frame.bytes = packed;
+	packed_frame.size = (size_t)packed_size;
+	status = pg_cache_frame_emit(PG_HEADER_CACHE_HOGG_DATALIST, 0,
+		count, pg_source_frame_span, &packed_frame,
+		pg_source_frame_write, &packed_frame);
+	if (status != PG_OK)
+		goto done;
 	status = pg_read_span(source->fd, source->identity.st_size,
 		table + 32 * (uint64_t)dl_file, disk, sizeof(disk));
 	if (status != PG_OK)
@@ -4074,7 +4102,7 @@ PG_API pg_status PG_CALL pg_source_copy(pg_source *destination,
 				input->info.stored_size <
 					input->info.logical_size));
 	status = pg_reader_open(input,
-		stored ? PG_READ_STORED : PG_READ_LOGICAL, &reader,
+		stored ? PG_READ_STORED : PG_READ_LOGICAL_PAYLOAD, &reader,
 		error);
 	if (status != PG_OK)
 		return status;
@@ -4085,6 +4113,9 @@ PG_API pg_status PG_CALL pg_source_copy(pg_source *destination,
 		options.entry.cached_header = input->info.cached_header;
 		options.entry.cached_header_size =
 			input->info.cached_header_size;
+		if (input->source->format != PG_LOOSE)
+			options.entry.cached_header_policy =
+				PG_HEADER_CACHE_EXPLICIT;
 	}
 	if (stored) {
 		uint8_t zero[16] = {};

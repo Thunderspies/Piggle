@@ -4,6 +4,7 @@ add_library(piggle
 	change.cpp
 	entries.cpp
 	file.cpp
+	header_cache.cpp
 	io.cpp
 	lease.cpp
 	managed.cpp
