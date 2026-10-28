@@ -432,6 +432,20 @@ struct pg_managed_scope {
 	uint32_t depth;
 };
 
+struct pg_source_edit {
+	pg_source *source;
+	const char *name;
+	pg_source_record *old;
+	pg_source_record *record;
+};
+
+pg_status pg_source_exact_stage(pg_source *source, const char *name,
+		pg_source_record **out, pg_error *error);
+pg_status pg_source_exact_reserve(pg_source *source,
+		pg_source_edit *edits, size_t count);
+void pg_source_exact_publish(pg_source_edit *edit);
+pg_status pg_tree_exact_changes(pg_tree *tree, int *handled, pg_error *error);
+
 struct pg_native_hint {
 	pg_native_hint *next;
 	pg_source *source;

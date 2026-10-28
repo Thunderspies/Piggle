@@ -1,5 +1,6 @@
 #include <piggle/piggle.h>
 #include "internal.hpp"
+#include "native_path.hpp"
 
 #ifdef __linux__
 #include <sys/inotify.h>
@@ -546,10 +547,543 @@ static int pg_change_scope_covered(pg_tree *tree, pg_tree_scope *scope)
 			continue;
 		}
 		if (pg_name_in_scope(scope->prefix, other->prefix,
-				!other->shallow))
+				     !other->shallow))
 			return 1;
 	}
 	return 0;
+}
+
+struct pg_exact_name {
+	const char *name;
+	pg_file *after;
+};
+
+struct pg_exact_source {
+	pg_source_record **index;
+	size_t count;
+};
+
+struct pg_exact_patch {
+	const char *name;
+	pg_file *replacement;
+	size_t position;
+	int existed;
+};
+
+struct pg_exact_scope {
+	pg_exact_scope *next;
+	pg_tree_scope *scope;
+	pg_tree_batch *batch;
+	pg_exact_patch *patches;
+	pg_file **files;
+	size_t count;
+	size_t file_count;
+};
+
+static int pg_exact_observed(pg_tree_scope *scope, const char *name)
+{
+	return scope->exact
+		   ? (scope->reader_refs || scope->managed) &&
+			 !strcmp(scope->prefix, name)
+		   : pg_name_in_scope(name, scope->prefix, !scope->shallow);
+}
+
+static int pg_exact_hint_selected(pg_tree *tree, pg_native_hint *hint)
+{
+	return !tree->query_name || !hint->name ||
+	       !strcmp(tree->query_name, hint->name) ||
+	       (hint->subtree &&
+		pg_name_in_scope(tree->query_name, hint->name, 1));
+}
+
+static int pg_exact_edit_order(const void *left, const void *right)
+{
+	const pg_source_edit *a = (const pg_source_edit *)left;
+	const pg_source_edit *b = (const pg_source_edit *)right;
+	int order = strcmp(a->name, b->name);
+
+	if (order)
+		return order;
+	return a->source->id < b->source->id ? -1
+					     : a->source->id > b->source->id;
+}
+
+static pg_source_edit *pg_exact_edit_find(pg_source_edit *edits, size_t count,
+					  pg_source *source, const char *name)
+{
+	size_t low = 0, size = count;
+
+	while (low < count) {
+		size_t middle = low + (count - low) / 2;
+		int order = strcmp(edits[middle].name, name);
+
+		if (!order)
+			order = edits[middle].source->id < source->id
+				    ? -1
+				    : edits[middle].source->id > source->id;
+		if (order < 0)
+			low = middle + 1;
+		else
+			count = middle;
+	}
+	return low < size && !strcmp(edits[low].name, name) &&
+		       edits[low].source == source
+		   ? edits + low
+		   : NULL;
+}
+
+static pg_cursor *pg_exact_cursor(pg_context *context, size_t capacity)
+{
+	pg_cursor *cursor = (pg_cursor *)calloc(1, sizeof(*cursor));
+
+	if (!cursor)
+		return NULL;
+	cursor->files =
+	    (pg_file **)calloc(capacity ? capacity : 1, sizeof(*cursor->files));
+	if (!cursor->files) {
+		free(cursor);
+		return NULL;
+	}
+	cursor->context = context;
+	pg_context_child_add(context);
+	return cursor;
+}
+
+static pg_status pg_exact_clone(pg_file *file, pg_file **out)
+{
+	*out = NULL;
+	if (!file)
+		return PG_OK;
+	pg_cursor one = {}, *copy = NULL;
+
+	one.context = file->source->context;
+	one.files = &file;
+	one.count = 1;
+	pg_status status = pg_tree_cursor_clone(&one, &copy);
+
+	if (status == PG_OK) {
+		*out = copy->files[0];
+		copy->count = 0;
+		pg_cursor_close(&copy, NULL);
+	}
+	return status;
+}
+
+static size_t pg_exact_baseline_position(pg_cursor *cursor, const char *name)
+{
+	size_t low = 0, high = cursor->count;
+
+	while (low < high) {
+		size_t middle = low + (high - low) / 2;
+
+		if (strcmp(cursor->files[middle]->info.canonical_name, name) <
+		    0)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	return low;
+}
+
+static void pg_exact_scopes_discard(pg_exact_scope *scopes)
+{
+	while (scopes) {
+		pg_exact_scope *next = scopes->next;
+
+		for (size_t i = 0; i < scopes->count; i++)
+			pg_file_close(&scopes->patches[i].replacement, NULL);
+		if (scopes->batch) {
+			pg_cursor_close(&scopes->batch->before, NULL);
+			pg_cursor_close(&scopes->batch->after, NULL);
+			free(scopes->batch);
+		}
+		free(scopes->patches);
+		free(scopes->files);
+		free(scopes);
+		scopes = next;
+	}
+}
+
+static pg_status pg_exact_scopes_prepare(pg_tree *tree, pg_exact_name *names,
+					 size_t count, pg_exact_scope **out)
+{
+	pg_exact_scope **tail = out;
+
+	*out = NULL;
+	for (pg_tree_scope *scope = tree->scopes; scope; scope = scope->next) {
+		if ((scope->exact && !scope->reader_refs && !scope->managed) ||
+		    pg_change_scope_covered(tree, scope))
+			continue;
+		pg_exact_scope *cut = (pg_exact_scope *)calloc(1, sizeof(*cut));
+
+		if (!cut)
+			return PG_NOMEM;
+		*tail = cut;
+		tail = &cut->next;
+		cut->scope = scope;
+		cut->batch = (pg_tree_batch *)calloc(1, sizeof(*cut->batch));
+		cut->patches =
+		    (pg_exact_patch *)calloc(count, sizeof(*cut->patches));
+		if (!cut->batch || !cut->patches)
+			return PG_NOMEM;
+		cut->batch->before = pg_exact_cursor(tree->context, count);
+		cut->batch->after = pg_exact_cursor(tree->context, count);
+		if (!cut->batch->before || !cut->batch->after)
+			return PG_NOMEM;
+		size_t additions = 0, removals = 0;
+
+		for (size_t i = 0; i < count; i++) {
+			if (!pg_exact_observed(scope, names[i].name))
+				continue;
+			pg_exact_patch *patch = cut->patches + cut->count++;
+
+			patch->name = names[i].name;
+			patch->position = pg_exact_baseline_position(
+			    scope->baseline, patch->name);
+			pg_file *before =
+			    patch->position < scope->baseline->count
+				? scope->baseline->files[patch->position]
+				: NULL;
+
+			patch->existed =
+			    before &&
+			    !strcmp(before->info.canonical_name, patch->name);
+			if (!patch->existed)
+				before = NULL;
+			pg_file *after = names[i].after;
+			pg_file *snapshot = NULL;
+			pg_status status = pg_exact_clone(before, &snapshot);
+
+			if (status != PG_OK)
+				return status;
+			if (snapshot)
+				cut->batch->before
+				    ->files[cut->batch->before->count++] =
+				    snapshot;
+			status = pg_exact_clone(after, &snapshot);
+			if (status != PG_OK)
+				return status;
+			if (snapshot)
+				cut->batch->after
+				    ->files[cut->batch->after->count++] =
+				    snapshot;
+			status = pg_exact_clone(after, &patch->replacement);
+			if (status != PG_OK)
+				return status;
+			additions += !before && after;
+			removals += before && !after;
+		}
+		if (!additions && !removals)
+			continue;
+		if (additions > SIZE_MAX - scope->baseline->count)
+			return PG_LIMIT;
+		cut->file_count = scope->baseline->count + additions - removals;
+		if (cut->file_count > SIZE_MAX / sizeof(*cut->files))
+			return PG_LIMIT;
+		cut->files =
+		    (pg_file **)malloc((cut->file_count ? cut->file_count : 1) *
+				       sizeof(*cut->files));
+		if (!cut->files)
+			return PG_NOMEM;
+		size_t from = 0, to = 0;
+
+		for (size_t i = 0; i < cut->count; i++) {
+			pg_exact_patch *patch = cut->patches + i;
+
+			while (from < patch->position)
+				cut->files[to++] =
+				    scope->baseline->files[from++];
+			from += patch->existed;
+			if (patch->replacement)
+				cut->files[to++] = patch->replacement;
+		}
+		while (from < scope->baseline->count)
+			cut->files[to++] = scope->baseline->files[from++];
+	}
+	return PG_OK;
+}
+
+static void pg_exact_scopes_publish(pg_tree *tree, pg_exact_scope *cuts)
+{
+	for (pg_exact_scope *cut = cuts; cut; cut = cut->next) {
+		pg_cursor *baseline = cut->scope->baseline;
+
+		for (size_t i = 0; i < cut->count; i++) {
+			pg_exact_patch *patch = cut->patches + i;
+
+			if (patch->existed)
+				pg_file_close(baseline->files + patch->position,
+					      NULL);
+			if (!cut->files && patch->replacement)
+				baseline->files[patch->position] =
+				    patch->replacement;
+			patch->replacement = NULL;
+		}
+		if (cut->files) {
+			free(baseline->files);
+			baseline->files = cut->files;
+			baseline->count = cut->file_count;
+			cut->files = NULL;
+		}
+		pg_tree_batch *batch = cut->batch;
+
+		batch->scope = cut->scope;
+		if (tree->pending_tail)
+			tree->pending_tail->next = batch;
+		else
+			tree->pending_head = batch;
+		tree->pending_tail = batch;
+		cut->batch = NULL;
+	}
+}
+
+/* Merge membership once per source; replacement pointers remain stable. */
+static pg_status pg_exact_indexes_prepare(pg_tree *tree, pg_source_edit *edits,
+					  size_t count,
+					  pg_exact_source *sources)
+{
+	for (size_t s = 0; s < tree->count; s++) {
+		pg_source *source = tree->sources[s];
+		size_t additions = 0, removals = 0;
+
+		for (size_t i = 0; i < count; i++) {
+			if (edits[i].source != source)
+				continue;
+			additions += !edits[i].old && edits[i].record;
+			removals += edits[i].old && !edits[i].record;
+		}
+		if (!additions && !removals)
+			continue;
+		pg_status status =
+		    pg_source_exact_reserve(source, edits, count);
+
+		if (status != PG_OK)
+			return status;
+		if (additions > SIZE_MAX - source->record_count)
+			return PG_LIMIT;
+		size_t size = source->record_count + additions - removals;
+
+		if (size > SIZE_MAX / sizeof(*source->record_index))
+			return PG_LIMIT;
+		pg_source_record **index = (pg_source_record **)malloc(
+		    (size ? size : 1) * sizeof(*index));
+
+		if (!index)
+			return PG_NOMEM;
+		sources[s].index = index;
+		sources[s].count = size;
+		size_t from = 0, to = 0;
+
+		for (size_t i = 0; i < count; i++) {
+			pg_source_edit *edit = edits + i;
+
+			if (edit->source != source)
+				continue;
+			while (
+			    from < source->record_count &&
+			    strcmp(
+				source->record_index[from]->info.canonical_name,
+				edit->name) < 0)
+				index[to++] = source->record_index[from++];
+			if (edit->old)
+				from++;
+			if (edit->record)
+				index[to++] =
+				    edit->old ? edit->old : edit->record;
+		}
+		while (from < source->record_count)
+			index[to++] = source->record_index[from++];
+	}
+	return PG_OK;
+}
+
+pg_status pg_tree_exact_changes(pg_tree *tree, int *handled, pg_error *error)
+{
+	*handled = 0;
+	if (!tree->hints || tree->native_repair || tree->loss_pending)
+		return PG_OK;
+	size_t count = 0;
+
+	for (pg_native_hint *h = tree->hints; h; h = h->next) {
+		if (!pg_exact_hint_selected(tree, h))
+			continue;
+		if (!h->name || h->subtree || h->source->format != PG_LOOSE ||
+		    h->source->fd < 0)
+			return PG_OK;
+		int known = 0;
+
+		for (pg_tree_scope *s = tree->scopes; s; s = s->next)
+			known |= pg_exact_observed(s, h->name);
+		if (!known)
+			return PG_OK;
+		count++;
+	}
+	if (!count)
+		return PG_OK;
+	if (count > SIZE_MAX / sizeof(pg_source_edit) ||
+	    count > SIZE_MAX / sizeof(pg_exact_name) ||
+	    count > SIZE_MAX / sizeof(pg_exact_patch))
+		return pg_result(PG_LIMIT, error);
+	pg_source_edit *edits = (pg_source_edit *)calloc(count, sizeof(*edits));
+	pg_exact_name *names = (pg_exact_name *)calloc(count, sizeof(*names));
+	pg_exact_source *sources = (pg_exact_source *)calloc(
+	    tree->count ? tree->count : 1, sizeof(*sources));
+	pg_exact_scope *scopes = NULL;
+	pg_status status = PG_OK;
+	uint64_t next_id = tree->context->next_id;
+	size_t used = 0, name_count = 0;
+	int fallback = 0;
+
+	for (size_t i = 0; i < tree->count; i++)
+		pg_source_lock(tree->sources[i]);
+	auto prepare = [&]() -> pg_status {
+		if (!edits || !names || !sources)
+			return PG_NOMEM;
+		for (pg_native_hint *h = tree->hints; h; h = h->next) {
+			if (!pg_exact_hint_selected(tree, h))
+				continue;
+			pg_source_edit *edit = edits + used++;
+
+			edit->source = h->source;
+			edit->name = h->name;
+			pg_status status = pg_source_record_find(
+			    h->source, h->name, &edit->old);
+
+			if (status != PG_OK)
+				return status;
+			if (pg_source_name_kind(h->source, h->name) ==
+			    PG_CONFLICT) {
+				fallback = 1;
+				return PG_OK;
+			}
+			status = pg_source_exact_stage(h->source, h->name,
+						       &edit->record, error);
+			if (status != PG_OK)
+				return status;
+			if (edit->record &&
+			    S_ISDIR(edit->record->identity.st_mode)) {
+				fallback = 1;
+				return PG_OK;
+			}
+			if (edit->old && edit->record) {
+				int changed = !pg_native_stat_same(
+				    &edit->old->identity,
+				    &edit->record->identity);
+
+				if (changed &&
+				    edit->old->info.copy_generation ==
+					UINT64_MAX)
+					return PG_LIMIT;
+				edit->record->info.copy_id =
+				    edit->old->info.copy_id;
+				edit->record->info.copy_generation =
+				    edit->old->info.copy_generation + changed;
+			}
+		}
+		qsort(edits, used, sizeof(*edits), pg_exact_edit_order);
+		for (size_t i = 0; i < used; i++) {
+			if (i && !strcmp(edits[i - 1].name, edits[i].name))
+				continue;
+			pg_exact_name *name = names + name_count++;
+			pg_source_record *winner = NULL;
+			pg_source *source = NULL;
+
+			name->name = edits[i].name;
+			for (size_t s = 0; s < tree->count; s++) {
+				pg_source *candidate = tree->sources[s];
+				pg_source_edit *edit = pg_exact_edit_find(
+				    edits, used, candidate, name->name);
+				pg_source_record *record = NULL;
+
+				if (pg_source_name_kind(
+					candidate, name->name) == PG_CONFLICT) {
+					fallback = 1;
+					return PG_OK;
+				}
+				if (edit) {
+					record = edit->record;
+				} else {
+					pg_status status =
+					    pg_source_record_find(
+						candidate, name->name, &record);
+
+					if (status != PG_OK)
+						return status;
+				}
+				if (record) {
+					winner = record;
+					source = candidate;
+				}
+			}
+			if (winner) {
+				pg_status status = pg_source_select(
+				    source, winner, &name->after, error);
+
+				if (status != PG_OK)
+					return status;
+				status = pg_tree_retain(tree);
+				if (status != PG_OK)
+					return status;
+				name->after->origin_tree = tree;
+			}
+		}
+		pg_status status =
+		    pg_exact_indexes_prepare(tree, edits, used, sources);
+
+		return status == PG_OK ? pg_exact_scopes_prepare(
+					     tree, names, name_count, &scopes)
+				       : status;
+	};
+	status = prepare();
+	if (status == PG_OK && !fallback) {
+		for (size_t s = 0; s < tree->count; s++) {
+			if (!sources[s].index)
+				continue;
+			pg_source *source = tree->sources[s];
+
+			free(source->record_index);
+			source->record_index = sources[s].index;
+			source->record_count = sources[s].count;
+			source->record_capacity = sources[s].count;
+			sources[s].index = NULL;
+		}
+		for (size_t i = 0; i < used; i++)
+			pg_source_exact_publish(edits + i);
+		pg_exact_scopes_publish(tree, scopes);
+		pg_native_hint **at = &tree->hints;
+
+		while (*at) {
+			pg_native_hint *hint = *at;
+
+			if (!pg_exact_hint_selected(tree, hint)) {
+				at = &hint->next;
+				continue;
+			}
+			*at = hint->next;
+			free(hint->name);
+			free(hint);
+		}
+		*handled = 1;
+	} else {
+		tree->context->next_id = next_id;
+	}
+	pg_exact_scopes_discard(scopes);
+	for (size_t i = 0; i < used; i++)
+		if (edits[i].record)
+			pg_record_release(edits[i].record);
+	for (size_t i = 0; i < name_count; i++)
+		pg_file_close(&names[i].after, NULL);
+	if (sources)
+		for (size_t s = 0; s < tree->count; s++)
+			free(sources[s].index);
+	free(edits);
+	free(names);
+	free(sources);
+	for (size_t i = tree->count; i; i--)
+		pg_source_unlock(tree->sources[i - 1]);
+	return status != PG_OK && error && error->status == status
+		   ? status
+		   : pg_result(status, error);
 }
 
 void pg_tree_pending_discard(pg_tree *tree)
