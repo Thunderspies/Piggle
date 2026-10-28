@@ -133,7 +133,18 @@ static inline void pg_header_release(pg_header_blob *blob, const void *data)
 	}
 }
 
+struct pg_source_record;
+struct pg_source_child {
+	char *name;
+	size_t parent_size;
+	size_t members;
+	size_t descendants;
+	pg_source_record *record;
+};
+
 struct pg_source_record {
+	pg_source_child *child_patch;
+	size_t child_patch_count;
 	pg_header_blob *header_blob;
 	pg_source_record *next;
 	pg_source_record *previous;
@@ -152,6 +163,9 @@ static inline pg_source_record *pg_record_archive_new()
 
 static inline void pg_record_release(pg_source_record *record)
 {
+	for (size_t i = 0; i < record->child_patch_count; i++)
+		free(record->child_patch[i].name);
+	free(record->child_patch);
 	free((void *)record->info.canonical_name);
 	free((void *)record->info.original_name);
 	pg_header_release(record->header_blob, record->info.cached_header);
@@ -236,6 +250,9 @@ struct pg_source {
 	char *native_path;
 	char *staging_directory;
 	pg_source_record *records;
+	pg_source_child *children;
+	size_t child_count;
+	size_t child_capacity;
 	pg_source_record **slot_index;
 	size_t slot_capacity;
 	pg_source_record **record_index;
@@ -332,10 +349,37 @@ static inline void pg_source_slots_take(pg_source *source, pg_source *probe)
 
 static inline void pg_source_index_clear(pg_source *source)
 {
+	for (size_t i = 0; i < source->child_count; i++)
+		free(source->children[i].name);
+	free(source->children);
+	source->children = NULL;
+	source->child_count = 0;
+	source->child_capacity = 0;
 	free(source->record_index);
 	source->record_index = NULL;
 	source->record_count = 0;
 	source->record_capacity = 0;
+}
+
+static inline int pg_source_child_directory(const pg_source_child *child)
+{
+	return child->descendants || (child->record &&
+		S_ISDIR(child->record->identity.st_mode));
+}
+
+pg_status pg_source_children_prepare(pg_source *source);
+pg_status pg_source_children_prepare_cut(pg_source *probe, pg_source *source,
+		const char *prefix, int recursive);
+pg_status pg_source_children_scope(pg_source *source, const char *prefix,
+		pg_source_child **out, size_t *count);
+static inline void pg_source_children_take(pg_source *source, pg_source *probe)
+{
+	source->children = probe->children;
+	source->child_count = probe->child_count;
+	source->child_capacity = probe->child_capacity;
+	probe->children = NULL;
+	probe->child_count = 0;
+	probe->child_capacity = 0;
 }
 
 void pg_source_hogg_cache_clear(pg_source *source);
@@ -355,6 +399,9 @@ pg_status pg_native_target_lease(const char *path, int exists, int *out,
 		int *native_code);
 
 struct pg_tree_source_state {
+	pg_source_child *children;
+	size_t child_count;
+	size_t child_capacity;
 	pg_source_record **slot_index;
 	size_t slot_capacity;
 	pg_source_record *records;
@@ -482,7 +529,8 @@ struct pg_cursor {
 };
 
 pg_status pg_indexed_directories(pg_source **sources, size_t count,
-		const char *prefix, const char ***out, size_t *size);
+		const char *prefix, int recursive, const char ***out,
+		size_t *size);
 int pg_directory_names_contain(const char **names, size_t count,
 		const char *name);
 

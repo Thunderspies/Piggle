@@ -196,6 +196,327 @@ done_cache:
 	return status;
 }
 
+/* Parent/name order makes each immediate-child range contiguous. */
+static int pg_child_parent_order(const pg_source_child *child,
+		const char *parent, size_t length)
+{
+	size_t shared = child->parent_size < length
+		? child->parent_size : length;
+	int order = strncmp(child->name, parent, shared);
+
+	return order ? order : child->parent_size < length ? -1 :
+		child->parent_size > length;
+}
+
+static int pg_child_order(const void *left, const void *right)
+{
+	const pg_source_child *a = (const pg_source_child *)left;
+	const pg_source_child *b = (const pg_source_child *)right;
+	int order = pg_child_parent_order(a, b->name, b->parent_size);
+
+	return order ? order : strcmp(a->name, b->name);
+}
+
+static pg_status pg_child_path(pg_source_record *record,
+		pg_source_child **out, size_t *count)
+{
+	const char *name = record->info.canonical_name;
+	size_t size = 1;
+
+	for (const char *at = name; *at; at++)
+		size += *at == '/';
+	if (size > SIZE_MAX / sizeof(**out))
+		return PG_LIMIT;
+	pg_source_child *items =
+		(pg_source_child *)calloc(size, sizeof(*items));
+
+	if (!items)
+		return PG_NOMEM;
+	size_t parent = 0, used = 0;
+
+	for (size_t i = 0;; i++) {
+		if (name[i] && name[i] != '/')
+			continue;
+		pg_source_child *child = &items[used++];
+
+		child->name = (char *)malloc(i + 1);
+		if (!child->name) {
+			for (size_t j = 0; j < used; j++)
+				free(items[j].name);
+			free(items);
+			return PG_NOMEM;
+		}
+		memcpy(child->name, name, i);
+		child->name[i] = 0;
+		child->parent_size = parent;
+		child->members = 1;
+		child->descendants = name[i] == '/';
+		child->record = name[i] ? NULL : record;
+		parent = i;
+		if (!name[i])
+			break;
+	}
+	*out = items;
+	*count = used;
+	return PG_OK;
+}
+
+static pg_source_record *pg_child_winner(pg_source_record *a,
+		pg_source_record *b)
+{
+	if (!a || !b)
+		return a ? a : b;
+	int adir = S_ISDIR(a->identity.st_mode);
+	int bdir = S_ISDIR(b->identity.st_mode);
+
+	if (adir != bdir)
+		return adir ? a : b;
+	return a->info.copy_id > b->info.copy_id ? a : b;
+}
+
+static pg_status pg_source_children_build(pg_source *source,
+		pg_source_record *extra = NULL, const char *prefix = NULL,
+		int shallow = 0)
+{
+	if (source->children)
+		return PG_OK;
+	pg_source_child *items = NULL;
+	size_t count = 0, capacity = 0;
+	pg_status status = PG_OK;
+
+	for (int phase = 0; phase < 2 && status == PG_OK; phase++) {
+		for (pg_source_record *r = phase ? extra : source->records;
+			r; r = r->next) {
+			if (phase && (shallow == 2
+				? !strcmp(r->info.canonical_name, prefix)
+				: pg_name_in_scope(r->info.canonical_name,
+					prefix, !shallow)))
+				continue;
+			pg_source_child *path = NULL;
+			size_t size = 0;
+
+			status = pg_child_path(r, &path, &size);
+			if (status != PG_OK)
+				break;
+			if (size > SIZE_MAX - count ||
+				count + size > SIZE_MAX / sizeof(*items)) {
+				status = PG_LIMIT;
+			} else if (count + size > capacity) {
+				size_t next = capacity > SIZE_MAX / 2
+					? count + size : capacity * 2;
+
+				if (next < count + size)
+					next = count + size;
+				if (next > SIZE_MAX / sizeof(*items))
+					next = count + size;
+				pg_source_child *grown =
+					(pg_source_child *)realloc(items,
+						next * sizeof(*items));
+
+				if (!grown)
+					status = PG_NOMEM;
+				else {
+					items = grown;
+					capacity = next;
+				}
+			}
+			if (status == PG_OK) {
+				memcpy(items + count, path,
+					size * sizeof(*items));
+				count += size;
+			} else {
+				for (size_t i = 0; i < size; i++)
+					free(path[i].name);
+			}
+			free(path);
+			if (status != PG_OK)
+				break;
+		}
+	}
+	if (status == PG_OK && !items) {
+		items = (pg_source_child *)calloc(1, sizeof(*items));
+		capacity = 1;
+		if (!items)
+			status = PG_NOMEM;
+	}
+	if (status != PG_OK) {
+		for (size_t i = 0; i < count; i++)
+			free(items[i].name);
+		free(items);
+		return status;
+	}
+	qsort(items, count, sizeof(*items), pg_child_order);
+	size_t kept = 0;
+
+	for (size_t i = 0; i < count;) {
+		pg_source_child child = items[i++];
+
+		while (i < count && !strcmp(child.name, items[i].name)) {
+			child.members += items[i].members;
+			child.descendants += items[i].descendants;
+			child.record = pg_child_winner(child.record,
+				items[i].record);
+			free(items[i++].name);
+		}
+		items[kept++] = child;
+	}
+	source->children = items;
+	source->child_count = kept;
+	source->child_capacity = capacity;
+	return PG_OK;
+}
+
+pg_status pg_source_children_scope(pg_source *source, const char *prefix,
+		pg_source_child **out, size_t *count)
+{
+	pg_status status = pg_source_children_build(source);
+
+	if (status != PG_OK)
+		return status;
+	const char *parent = prefix ? prefix : "";
+	size_t length = strlen(parent), low = 0, high = source->child_count;
+
+	while (low < high) {
+		size_t middle = low + (high - low) / 2;
+
+		if (pg_child_parent_order(source->children + middle,
+				parent, length) < 0)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	size_t begin = low;
+
+	high = source->child_count;
+	while (low < high) {
+		size_t middle = low + (high - low) / 2;
+
+		if (pg_child_parent_order(source->children + middle,
+				parent, length) <= 0)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	*out = source->children + begin;
+	*count = low - begin;
+	return PG_OK;
+}
+
+static size_t pg_child_position(pg_source *source, const char *name,
+		size_t length, size_t parent)
+{
+	size_t low = 0, high = source->child_count;
+
+	while (low < high) {
+		size_t middle = low + (high - low) / 2;
+		pg_source_child *child = source->children + middle;
+		int order = pg_child_parent_order(child, name, parent);
+
+		if (!order) {
+			order = strncmp(child->name, name, length);
+			if (!order)
+				order = child->name[length] != 0;
+		}
+		if (order < 0)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	return low;
+}
+
+static pg_status pg_child_add_prepare(pg_source *source,
+		pg_source_record *record)
+{
+	if (!source->children)
+		return PG_OK;
+	pg_status status = pg_child_path(record, &record->child_patch,
+		&record->child_patch_count);
+
+	if (status != PG_OK)
+		return status;
+	size_t needed = source->child_count + record->child_patch_count;
+
+	if (needed < source->child_count ||
+		needed > SIZE_MAX / sizeof(*source->children))
+		return PG_LIMIT;
+	if (needed <= source->child_capacity)
+		return PG_OK;
+	size_t capacity = source->child_capacity * 2;
+
+	if (capacity < needed ||
+		capacity > SIZE_MAX / sizeof(*source->children))
+		capacity = needed;
+	pg_source_child *grown = (pg_source_child *)realloc(source->children,
+		capacity * sizeof(*grown));
+
+	if (!grown)
+		return PG_NOMEM;
+	source->children = grown;
+	source->child_capacity = capacity;
+	return PG_OK;
+}
+
+/* Publish only preallocated child paths. Existing metadata stays in place. */
+static void pg_child_add_publish(pg_source *source, pg_source_record *record)
+{
+	for (size_t i = 0; i < record->child_patch_count; i++) {
+		pg_source_child *child = record->child_patch + i;
+		size_t at = pg_child_position(source, child->name,
+			strlen(child->name), child->parent_size);
+
+		if (at < source->child_count &&
+			!strcmp(source->children[at].name, child->name)) {
+			source->children[at].members++;
+			source->children[at].descendants += child->descendants;
+			source->children[at].record = pg_child_winner(
+				source->children[at].record, child->record);
+			free(child->name);
+		} else {
+			memmove(source->children + at + 1,
+				source->children + at,
+				(source->child_count - at) * sizeof(*child));
+			source->children[at] = *child;
+			source->child_count++;
+		}
+		child->name = NULL;
+	}
+	free(record->child_patch);
+	record->child_patch = NULL;
+	record->child_patch_count = 0;
+}
+
+pg_status pg_source_children_prepare_cut(pg_source *probe, pg_source *source,
+		const char *prefix, int recursive)
+{
+	return pg_source_children_build(probe, source->records, prefix,
+		recursive ? 0 : 1);
+}
+
+static void pg_source_children_reselect(pg_source *source)
+{
+	for (size_t i = 0; i < source->child_count; i++)
+		source->children[i].record = NULL;
+	for (pg_source_record *r = source->records; r; r = r->next) {
+		const char *name = r->info.canonical_name;
+		const char *slash = strrchr(name, '/');
+		size_t at = pg_child_position(source, name, strlen(name),
+			slash ? (size_t)(slash - name) : 0);
+
+		source->children[at].record = pg_child_winner(
+			source->children[at].record, r);
+	}
+}
+
+pg_status pg_source_children_prepare(pg_source *source)
+{
+	pg_status status = pg_source_children_build(source);
+
+	if (status == PG_OK)
+		pg_source_children_reselect(source);
+	return status;
+}
+
 /* All metadata needed to expose a known mutation is prepared before its
  * operation journal becomes committed. No allocation follows successful redo.
  */
@@ -294,6 +615,9 @@ static pg_status pg_hogg_record_prepare(
 	}
 	pg_status status = pg_source_slots_reserve(source, (size_t)slot + 1);
 
+	if (status == PG_OK && !old)
+		status = pg_child_add_prepare(source, record);
+
 	if (status != PG_OK) {
 		pg_record_release(record);
 		return status;
@@ -301,6 +625,8 @@ static pg_status pg_hogg_record_prepare(
 	*out = record;
 	return PG_OK;
 }
+
+static void pg_child_remove(pg_source *source, const char *name);
 
 static void pg_hogg_record_publish(
 	pg_source *source, const uint8_t *frame, pg_source_record *prepared)
@@ -394,6 +720,7 @@ static void pg_hogg_record_publish(
 				old->next->previous = old->previous;
 			cache->records[slot] = NULL;
 			source->slot_index[slot] = NULL;
+			pg_child_remove(source, old->info.canonical_name);
 			pg_record_release(old);
 		}
 	} else if (prepared) {
@@ -421,6 +748,7 @@ static void pg_hogg_record_publish(
 		source->records = prepared;
 		cache->records[slot] = prepared;
 		source->slot_index[slot] = prepared;
+		pg_child_add_publish(source, prepared);
 		source->context->next_id++;
 	}
 	source->generation++;
@@ -443,6 +771,37 @@ static pg_source_record *pg_source_index_last(
 	return low && !strcmp(items[low - 1]->info.canonical_name, name)
 		? items[low - 1]
 		: NULL;
+}
+
+static void pg_child_remove(pg_source *source, const char *name)
+{
+	if (!source->children)
+		return;
+	size_t parent = 0;
+
+	for (size_t i = 0;; i++) {
+		if (name[i] && name[i] != '/')
+			continue;
+		size_t at = pg_child_position(source, name, i, parent);
+		pg_source_child *child = source->children + at;
+
+		child->members--;
+		child->descendants -= name[i] == '/';
+		if (!child->members) {
+			free(child->name);
+			memmove(child, child + 1,
+				(source->child_count - at - 1) *
+					sizeof(*child));
+			source->child_count--;
+		} else if (!name[i]) {
+			child->record = pg_source_index_last(
+				source->record_index, source->record_count,
+				name);
+		}
+		parent = i;
+		if (!name[i])
+			break;
+	}
 }
 
 pg_status pg_source_record_find(
@@ -1700,6 +2059,9 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 	int shallow = 0)
 {
 	pg_source probe = *source;
+	probe.children = NULL;
+	probe.child_count = 0;
+	probe.child_capacity = 0;
 	probe.record_index = NULL;
 	probe.record_count = 0;
 	pg_source_record *old, *next;
@@ -1714,6 +2076,7 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 		: pg_source_loose_scan(
 				&probe, source->fd, "", prefix, native_code);
 	if (status != PG_OK) {
+		pg_source_index_clear(&probe);
 		pg_source_records_free(probe.records);
 		return status;
 	}
@@ -1738,6 +2101,7 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 	}
 	status = pg_source_loose_compact(&probe);
 	if (status != PG_OK) {
+		pg_source_index_clear(&probe);
 		pg_source_records_free(probe.records);
 		return status;
 	}
@@ -1749,6 +2113,7 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 			record = record->next) {
 			if (strcmp(record->info.canonical_name,
 					prefix) == 0) {
+				pg_source_index_clear(&probe);
 				pg_source_records_free(probe.records);
 				return PG_CONFLICT;
 			}
@@ -1756,6 +2121,7 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 	}
 	status = pg_source_record_index(probe.records, &items, &count);
 	if (status != PG_OK) {
+		pg_source_index_clear(&probe);
 		pg_source_records_free(probe.records);
 		return status;
 	}
@@ -1774,12 +2140,33 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 			!pg_native_stat_same(
 				&found->identity, &old->identity)) {
 			free(items);
+			pg_source_index_clear(&probe);
 			pg_source_records_free(probe.records);
 			return PG_LIMIT;
 		}
 	}
+	for (old = source->records; old; old = old->next) {
+		pg_source_record *found = pg_source_record_index_find(
+			items, count, old->info.canonical_name);
+
+		if (found) {
+			found->info.copy_id = old->info.copy_id;
+			found->info.copy_generation = old->info.copy_generation;
+			if (!pg_native_stat_same(&found->identity, &old->identity))
+				found->info.copy_generation++;
+		}
+	}
+	status = pg_source_children_build(&probe, source->records, prefix,
+		shallow);
+	if (status != PG_OK) {
+		free(items);
+		pg_source_index_clear(&probe);
+		pg_source_records_free(probe.records);
+		return status;
+	}
 	old = source->records;
 	pg_source_index_clear(source);
+	pg_source_children_take(source, &probe);
 	source->records = probe.records;
 	while (old) {
 		pg_source_record *found;
@@ -2627,6 +3014,9 @@ static pg_status pg_source_pigg_clone(pg_source *source,
 	probe = *source;
 	probe.slot_index = NULL;
 	probe.slot_capacity = 0;
+	probe.children = NULL;
+	probe.child_count = 0;
+	probe.child_capacity = 0;
 	probe.record_index = NULL;
 	probe.record_count = 0;
 	probe.fd = fd;
@@ -2688,10 +3078,12 @@ static pg_status pg_source_pigg_clone(pg_source *source,
 		record->info.copy_id = source->context->next_id++;
 		record->info.copy_generation = 1;
 	}
+	pg_source_children_reselect(&probe);
 	source->generation++;
 	pg_source_index_clear(source);
 	pg_source_records_free(source->records);
 	pg_source_slots_take(source, &probe);
+	pg_source_children_take(source, &probe);
 	source->records = probe.records;
 	probe.records = NULL;
 #ifdef _WIN32
@@ -2732,6 +3124,7 @@ pigg_done:
 	free(headers);
 	if (status != PG_OK && status != PG_COMMITTED && probe.records) {
 		free(probe.slot_index);
+		pg_source_index_clear(&probe);
 		pg_source_records_free(probe.records);
 	}
 	pg_native_result(status, native_code, error);
@@ -3871,6 +4264,9 @@ PG_API pg_status PG_CALL pg_source_open(pg_context *context,
 			record->info.source_generation = 1;
 			record->info.copy_generation = 1;
 		}
+		status = pg_source_children_prepare(source);
+		if (status != PG_OK)
+			goto cleanup;
 		source->refs = 1;
 		source->next_in_context = context->sources;
 		context->sources = source;
@@ -4366,6 +4762,9 @@ static pg_status pg_source_find_mode_coordinated(pg_source *source,
 		(fresh ||
 			!pg_source_lookup_covered(source, canonical))) {
 		pg_source probe = *source;
+		probe.children = NULL;
+		probe.child_count = 0;
+		probe.child_capacity = 0;
 		probe.record_index = NULL;
 		probe.record_count = 0;
 
@@ -4382,8 +4781,10 @@ static pg_status pg_source_find_mode_coordinated(pg_source *source,
 		status = pg_source_loose_probe(fresh ? &probe : source,
 			canonical, &selected, &native_code);
 		if (status != PG_OK) {
-			if (fresh)
+			if (fresh) {
+				pg_source_index_clear(&probe);
 				pg_source_records_free(probe.records);
+			}
 			free(canonical);
 			return pg_native_result(
 				status, native_code, error);
@@ -4464,6 +4865,21 @@ static pg_status pg_source_name_kind_coordinated(
 	pg_source *source, const char *name)
 {
 	pg_status status = PG_NOT_FOUND;
+	if (source->children) {
+		const char *slash = strrchr(name, '/');
+		size_t parent = slash ? (size_t)(slash - name) : 0;
+		size_t at = pg_child_position(source, name,
+			strlen(name), parent);
+
+		if (at == source->child_count ||
+			strcmp(source->children[at].name, name))
+			return PG_NOT_FOUND;
+		pg_source_child *child = source->children + at;
+
+		return child->descendants || (child->record &&
+			S_ISDIR(child->record->identity.st_mode))
+			? PG_CONFLICT : PG_OK;
+	}
 	if (source->record_index) {
 		if (pg_source_items_directory(source->record_index,
 				source->record_count, name))
@@ -4675,6 +5091,7 @@ static pg_status pg_source_files_depth_coordinated(pg_source *source,
 	pg_error *error)
 {
 	pg_source_record **items = NULL;
+	pg_source_child *children = NULL;
 	pg_cursor *cursor;
 	char *canonical = NULL;
 	size_t required = 0, count = 0, i;
@@ -4711,7 +5128,11 @@ static pg_status pg_source_files_depth_coordinated(pg_source *source,
 		status = PG_INVALID;
 		goto fail_early;
 	}
-	status = pg_source_index_get(source, &items, &count);
+	if (recursive)
+		status = pg_source_index_get(source, &items, &count);
+	else
+		status = pg_source_children_scope(source, canonical,
+			&children, &count);
 	if (status != PG_OK)
 		goto fail_early;
 	if (canonical &&
@@ -4719,7 +5140,7 @@ static pg_status pg_source_files_depth_coordinated(pg_source *source,
 		status = PG_CONFLICT;
 		goto fail_early;
 	}
-	if (canonical) {
+	if (canonical && recursive) {
 		size_t begin, end;
 
 		pg_source_index_scope(
@@ -4748,20 +5169,25 @@ static pg_status pg_source_files_depth_coordinated(pg_source *source,
 	}
 	for (i = 0; i < count;) {
 		size_t next = i + 1;
-		pg_source_record *selected = items[i];
+		pg_source_record *selected = recursive
+			? items[i] : children[i].record;
+
+		if (!recursive && (children[i].descendants || !selected ||
+				S_ISDIR(selected->identity.st_mode))) {
+			i = next;
+			continue;
+		}
 		const char *name = selected->info.canonical_name;
 
-		while (next < count &&
-			strcmp(name,
-				items[next]->info.canonical_name) ==
-				0) {
+		while (recursive && next < count &&
+			!strcmp(name, items[next]->info.canonical_name)) {
 			selected = items[next];
 			next++;
 		}
 		if (pg_name_in_scope(name, canonical, recursive) &&
 			!S_ISDIR(selected->identity.st_mode) &&
-			!pg_source_items_directory(
-				items, count, name)) {
+			(!recursive || !pg_source_items_directory(
+				items, count, name))) {
 			status = pg_source_select(source, selected,
 				&cursor->files[cursor->count], error);
 			if (status != PG_OK)
@@ -4872,6 +5298,9 @@ static pg_status pg_source_rescan_locked(
 		size_t count = 0;
 
 		probe = *source;
+		probe.children = NULL;
+		probe.child_count = 0;
+		probe.child_capacity = 0;
 		probe.record_index = NULL;
 		probe.record_count = 0;
 		probe.records = NULL;
@@ -4904,18 +5333,21 @@ static pg_status pg_source_rescan_locked(
 					&native_code);
 		}
 		if (status != PG_OK) {
+			pg_source_index_clear(&probe);
 			pg_source_records_free(probe.records);
 			return pg_native_result(
 				status, native_code, error);
 		}
 		status = pg_source_loose_compact(&probe);
 		if (status != PG_OK) {
+			pg_source_index_clear(&probe);
 			pg_source_records_free(probe.records);
 			return pg_result(status, error);
 		}
 		status = pg_source_record_index(
 			source->records, &items, &count);
 		if (status != PG_OK) {
+			pg_source_index_clear(&probe);
 			pg_source_records_free(probe.records);
 			return pg_result(status, error);
 		}
@@ -4943,8 +5375,16 @@ static pg_status pg_source_rescan_locked(
 				record->info.copy_generation++;
 			}
 		}
+		status = pg_source_children_prepare(&probe);
+		if (status != PG_OK) {
+			free(items);
+			pg_source_index_clear(&probe);
+			pg_source_records_free(probe.records);
+			return pg_result(status, error);
+		}
 		free(items);
 		pg_source_index_clear(source);
+		pg_source_children_take(source, &probe);
 		pg_source_records_free(source->records);
 		source->records = probe.records;
 		return pg_result(PG_OK, error);
@@ -4961,6 +5401,9 @@ static pg_status pg_source_rescan_locked(
 	probe = *source;
 	probe.slot_index = NULL;
 	probe.slot_capacity = 0;
+	probe.children = NULL;
+	probe.child_count = 0;
+	probe.child_capacity = 0;
 	probe.record_index = NULL;
 	probe.record_count = 0;
 	probe.records = NULL;
@@ -4972,6 +5415,7 @@ static pg_status pg_source_rescan_locked(
 		if (status == PG_RECOVERY_REQUIRED)
 			source->recovery_required = 1;
 		free(probe.slot_index);
+		pg_source_index_clear(&probe);
 		pg_source_records_free(probe.records);
 		return pg_result(status, error);
 	}
@@ -4979,12 +5423,14 @@ static pg_status pg_source_rescan_locked(
 		lstat(source->native_path, &path_state)) {
 		native_code = errno;
 		free(probe.slot_index);
+		pg_source_index_clear(&probe);
 		pg_source_records_free(probe.records);
 		return pg_native_result(PG_IO, native_code, error);
 	}
 	if (!pg_native_stat_same(&current, &final) ||
 		!pg_native_stat_same(&final, &path_state)) {
 		free(probe.slot_index);
+		pg_source_index_clear(&probe);
 		pg_source_records_free(probe.records);
 		return pg_result(PG_RETRY, error);
 	}
@@ -4994,6 +5440,7 @@ static pg_status pg_source_rescan_locked(
 		!pg_native_stat_same(&source->identity, &current)) {
 		if (generation == UINT64_MAX) {
 			free(probe.slot_index);
+			pg_source_index_clear(&probe);
 			pg_source_records_free(probe.records);
 			return pg_result(PG_LIMIT, error);
 		}
@@ -5007,6 +5454,7 @@ static pg_status pg_source_rescan_locked(
 		(match_count ? match_count : 1) * sizeof(*matches));
 	if (!matches) {
 		free(probe.slot_index);
+		pg_source_index_clear(&probe);
 		pg_source_records_free(probe.records);
 		return pg_result(PG_NOMEM, error);
 	}
@@ -5075,6 +5523,7 @@ static pg_status pg_source_rescan_locked(
 			record->info.copy_generation++;
 		}
 	}
+	pg_source_children_reselect(&probe);
 	free(matches);
 	pg_source_index_clear(source);
 	pg_source_hogg_cache_clear(source);
@@ -5083,6 +5532,7 @@ static pg_status pg_source_rescan_locked(
 	source->slot_capacity = 0;
 	pg_source_records_free(source->records);
 	pg_source_slots_take(source, &probe);
+	pg_source_children_take(source, &probe);
 	source->records = probe.records;
 	source->identity = current;
 	source->generation = generation;
@@ -5092,6 +5542,7 @@ static pg_status pg_source_rescan_locked(
 limit:
 	free(matches);
 	free(probe.slot_index);
+	pg_source_index_clear(&probe);
 	pg_source_records_free(probe.records);
 	return pg_result(PG_LIMIT, error);
 }

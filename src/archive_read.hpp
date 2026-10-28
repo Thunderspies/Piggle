@@ -790,14 +790,18 @@ static inline pg_status pg_pigg_index(pg_source *source)
 {
 	pg_status status = pg_pigg_index_records(source);
 
-	return status == PG_OK ? pg_source_slots_prepare(source) : status;
+	if (status == PG_OK)
+		status = pg_source_slots_prepare(source);
+	return status == PG_OK ? pg_source_children_prepare(source) : status;
 }
 
 static inline pg_status pg_hogg_index(pg_source *source)
 {
 	pg_status status = pg_hogg_index_records(source);
 
-	return status == PG_OK ? pg_source_slots_prepare(source) : status;
+	if (status == PG_OK)
+		status = pg_source_slots_prepare(source);
+	return status == PG_OK ? pg_source_children_prepare(source) : status;
 }
 
 static inline pg_status pg_archive_verify_payload(int fd,

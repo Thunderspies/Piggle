@@ -1083,7 +1083,7 @@ static pg_status pg_tree_files_depth_coordinated(pg_tree *tree,
 	if (status != PG_OK)
 		goto fail_early;
 	status = pg_indexed_directories(tree->sources, tree->count,
-		canonical, &directories, &directory_count);
+		canonical, recursive, &directories, &directory_count);
 	if (status != PG_OK)
 		goto fail_early;
 	merged = (pg_cursor *)calloc(1, sizeof(*merged));
@@ -1458,6 +1458,9 @@ void pg_tree_sources_discard(pg_tree *tree, pg_tree_source_state *saved)
 	if (!saved)
 		return;
 	for (size_t i = 0; i < tree->count; i++) {
+		for (size_t j = 0; j < saved[i].child_count; j++)
+			free(saved[i].children[j].name);
+		free(saved[i].children);
 		free(saved[i].slot_index);
 		pg_tree_records_free(saved[i].records);
 		pg_tree_requests_free(saved[i].exact_requests);
@@ -1507,6 +1510,14 @@ static pg_status pg_tree_sources_save_mode(pg_tree *tree,
 		probe.format = source->format;
 		probe.records = saved[i].records;
 		pg_status indexed = pg_source_slots_prepare(&probe);
+
+		if (indexed == PG_OK)
+			indexed = loose_only ? pg_source_children_prepare_cut(
+				&probe, source, prefix, recursive)
+				: pg_source_children_prepare(&probe);
+		saved[i].children = probe.children;
+		saved[i].child_count = probe.child_count;
+		saved[i].child_capacity = probe.child_capacity;
 
 		saved[i].slot_index = probe.slot_index;
 		saved[i].slot_capacity = probe.slot_capacity;
@@ -1586,6 +1597,11 @@ void pg_tree_sources_restore(pg_tree *tree, pg_tree_source_state *saved)
 			tail->next = source->records;
 			source->records = saved[i].records;
 		}
+		source->children = saved[i].children;
+		source->child_count = saved[i].child_count;
+		source->child_capacity = saved[i].child_capacity;
+		saved[i].children = NULL;
+		saved[i].child_count = 0;
 		free(source->slot_index);
 		source->slot_index = saved[i].slot_index;
 		source->slot_capacity = saved[i].slot_capacity;
