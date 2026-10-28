@@ -121,11 +121,16 @@ THEN("^the edited entry retains its payload and the complete cached header$")
 			w.expected.size()));
 	char bytes[3];
 	size_t count;
+	pg_reader *payload = nullptr;
 
-	expect_status(pg_file_read_all(
-			w.file, bytes, sizeof(bytes), &count, &w.error),
+	expect_status(pg_reader_open(w.file, PG_READ_LOGICAL_PAYLOAD,
+			&payload, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_reader_read(
+			payload, bytes, sizeof(bytes), &count, &w.error),
 		PG_OK, w.error);
 	EXPECT_EQ(std::string(bytes, count), "abc");
+	expect_status(pg_reader_close(&payload, &w.error), PG_OK, w.error);
 }
 
 GIVEN("^a HOGG contains obsolete payload bytes after replacement$")
@@ -325,6 +330,175 @@ THEN("^the original builder can publish its checkpointed content$")
 			bytes, sizeof(bytes), &count, &w.error),
 		PG_OK, w.error);
 	EXPECT_EQ("abc", std::string(bytes, count));
+}
+
+static std::string cached_resource()
+{
+	return std::string("\4\0\0\0headtailbody", 16);
+}
+
+GIVEN("^a \"(PIGG|HOGG)\" builder for a resource with a valid header$")
+{
+	REGEX_PARAM(std::string, format);
+	World &w = world();
+
+	w.bytes = cached_resource();
+	w.active = "header-cache";
+	w.paths[w.active] = "header.archive";
+	expect_status(pg_archive_builder_create(w.context, "header.archive",
+			format == "PIGG" ? PG_PIGG2 : PG_HOGG10, 0,
+			&w.builder, &w.error),
+		PG_OK, w.error);
+}
+
+WHEN("^I stage the resource with \"(automatic|suppressed|explicit)\" "
+	"header caching$")
+{
+	REGEX_PARAM(std::string, policy);
+	World &w = world();
+	pg_entry_options options = {};
+
+	options.compression = PG_COMPRESS_FORCE;
+	w.expected = w.bytes.substr(0, 8);
+	if (policy == "suppressed") {
+		options.cached_header_policy = PG_HEADER_CACHE_NONE;
+		w.expected.clear();
+	} else if (policy == "explicit") {
+		w.expected = "opaque";
+		options.cached_header_policy = PG_HEADER_CACHE_EXPLICIT;
+		options.cached_header = w.expected.data();
+		options.cached_header_size = w.expected.size();
+	}
+	expect_status(pg_archive_builder_write_all(w.builder, "mesh.geo",
+			w.bytes.data(), w.bytes.size(), &options, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_archive_builder_finish(w.builder, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_archive_builder_close(&w.builder, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_source_open(w.context, "header.archive", nullptr,
+			&w.sources[w.active], &w.error),
+		PG_OK, w.error);
+}
+
+THEN("^its archive metadata contains the selected header$")
+{
+	World &w = world();
+	pg_file_info info;
+
+	expect_status(pg_source_find(w.source(), "mesh.geo", &w.file, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_file_inspect(w.file, &info, &w.error), PG_OK, w.error);
+	EXPECT_EQ(info.cached_header_size, w.expected.size());
+	if (info.cached_header_size)
+		EXPECT_EQ(std::string((const char *)info.cached_header,
+			info.cached_header_size), w.expected);
+	else
+		EXPECT_EQ(info.cached_header, nullptr);
+}
+
+THEN("^logical prefix reads use that cached header$")
+{
+	World &w = world();
+	size_t size = w.expected.empty() ? 4 : w.expected.size();
+
+	expect_status(pg_reader_open(w.file, PG_READ_LOGICAL,
+			&w.reader, &w.error),
+		PG_OK, w.error);
+	EXPECT_EQ(w.chunk(w.reader, size),
+		w.expected.empty() ? w.bytes.substr(0, size) : w.expected);
+	expect_status(w.status, PG_OK, w.error);
+	expect_status(pg_reader_close(&w.reader, &w.error), PG_OK, w.error);
+}
+
+THEN("^a payload-only reader returns the original resource$")
+{
+	World &w = world();
+
+	expect_status(pg_reader_open(w.file, PG_READ_LOGICAL_PAYLOAD,
+			&w.reader, &w.error),
+		PG_OK, w.error);
+	EXPECT_EQ(w.chunk(w.reader, w.bytes.size() + 1), w.bytes);
+	expect_status(w.status, PG_OK, w.error);
+	expect_status(pg_reader_close(&w.reader, &w.error), PG_OK, w.error);
+}
+
+GIVEN("^logical resource bytes with a length-prefixed header$")
+{
+	world().bytes = cached_resource();
+}
+
+WHEN("^I classify and extract its header independently$")
+{
+	World &w = world();
+	pg_header_recipe recipe;
+	pg_header_cache_info info;
+
+	expect_status(pg_header_cache_classify("mesh.GEO", &recipe, &w.error),
+		PG_OK, w.error);
+	EXPECT_EQ(recipe.mode, PG_HEADER_RECIPE_U32LE);
+	EXPECT_EQ(recipe.adjustment, 4);
+	expect_status(pg_header_cache_probe("mesh.geo", w.bytes.data(), 4,
+			w.bytes.size(), &info, &w.error),
+		PG_OK, w.error);
+	EXPECT_EQ(info.size, 8u);
+	expect_status(pg_header_cache_extract("mesh.geo", w.bytes.data(),
+			w.bytes.size(), 8, &w.buffer, &w.error),
+		PG_OK, w.error);
+}
+
+THEN("^the independent cache contains its complete header prefix$")
+{
+	World &w = world();
+
+	ASSERT_EQ(w.buffer.size, 8u);
+	EXPECT_EQ(std::string((const char *)w.buffer.data, w.buffer.size),
+		w.bytes.substr(0, 8));
+}
+
+GIVEN("^independent binary cache slots with empty entries$")
+{
+	world().payloads = {"alpha", "", std::string("\0\377hdr", 5), ""};
+}
+
+WHEN("^I encode and decode the slots as a \"(PIGG pool|HOGG DataList)\"$")
+{
+	REGEX_PARAM(std::string, container);
+	World &w = world();
+	std::vector<pg_header_cache_span> spans;
+	pg_header_cache *cache = nullptr;
+	uint32_t format = container == "PIGG pool" ?
+		PG_HEADER_CACHE_PIGG_POOL : PG_HEADER_CACHE_HOGG_DATALIST;
+
+	for (const auto &bytes : w.payloads)
+		spans.push_back({bytes.data(), bytes.size()});
+	expect_status(pg_header_cache_encode(format, spans.data(), spans.size(),
+			&w.buffer, &w.error),
+		PG_OK, w.error);
+	expect_status(pg_header_cache_decode(format, w.buffer.data,
+			w.buffer.size, &cache, &w.error),
+		PG_OK, w.error);
+	pg_buffer_free(&w.buffer);
+	size_t count = 0;
+
+	expect_status(pg_header_cache_count(cache, &count, &w.error),
+		PG_OK, w.error);
+	for (size_t i = 0; i < count; i++) {
+		pg_header_cache_span span;
+
+		expect_status(pg_header_cache_get(cache, i, &span, &w.error),
+			PG_OK, w.error);
+		w.names.push_back(span.size ?
+			std::string((const char *)span.data, span.size) : "");
+	}
+	expect_status(pg_header_cache_close(&cache, &w.error), PG_OK, w.error);
+}
+
+THEN("^every slot retains its index and original bytes$")
+{
+	World &w = world();
+
+	EXPECT_EQ(w.names, w.payloads);
 }
 
 } // namespace

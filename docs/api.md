@@ -18,8 +18,8 @@ the same `pg_*` functions into `piggle` and offer shorter type aliases; they
 add no classes, overloads, templates, ownership conversions or ABI. Include
 `piggle/piggle.h` or `piggle/piggle.hpp` for the complete surface.
 
-No writer seek, append, partial payload editing, revision history, asset
-interpretation, game-directory discovery or cross-source transaction is
+No writer seek, append, partial payload editing, revision history, general
+asset interpretation, game-directory discovery or cross-source transaction is
 promised. Reading exact stored bytes is supported, with validation. Archive
 construction is a transaction on one native destination; editing an existing
 source commits one selected file at a time. Arbitrary custom I/O, allocators
@@ -98,8 +98,9 @@ is not a control-flow interface.
 
 ## Ownership and release
 
-`pg_buffer` is a plain owning pair of data and length, produced only by
-`read_all_alloc`. Initialize it to `{NULL, 0}` before an output call and release
+`pg_buffer` is a plain owning pair of data and length, produced by
+`read_all_alloc`, header extraction and cache encoding. Initialize it to
+`{NULL, 0}` before an output call and release
 it with `pg_buffer_free(&buffer)`. This immediate, infallible function resets
 both fields, does no native I/O, and leaves diagnostics unchanged. An empty
 buffer is a valid no-op; the buffer address itself is required. Do not call
@@ -161,8 +162,9 @@ earlier bytes were skipped. Backward seek permits reading after EOF.
 Native, uncompressed and stored-representation readers reposition directly.
 Compressed logical readers start retaining decompressor checkpoints when seek
 is first used. Checkpoints are spaced at 1 MiB boundaries, with up to 64 retained
-per reader and least-recently-used eviction. A seek restores the nearest
-preceding checkpoint and decodes the remainder; the initial state remains
+per reader and least-recently-used eviction. Payload access restores the nearest
+preceding checkpoint and decodes the remainder; a cached-prefix seek need not
+decode anything. The initial state remains
 available without a checkpoint. Cache allocation is optional: inability to
 retain a checkpoint falls back to decoding without changing the public result.
 Independent reader caches are released on close. Writer positions remain
@@ -219,12 +221,16 @@ spans expire on return. Copy a name before scheduling work that outlives it.
 
 ## Names and resolution
 
-All name-taking APIs use the same virtual spelling. Normalization converts
+Virtual name-taking APIs use the same spelling. Normalization converts
 backslashes to `/`, folds ASCII A-Z, removes empty and `.` components and
 trailing separators. It rejects rooted names, colons, any `..` component and
 an empty result. Non-ASCII bytes are unchanged. Root subtree requests and
 enumeration accept NULL/empty prefix; `.` is not a root alias. Native paths
 remain separate and retain OS spelling.
+
+Standalone header classification, probing and extraction inspect the supplied
+filename's extension directly, including native filenames. They do not apply
+virtual-name normalization or access the filesystem.
 
 Source open indexes all archive pathname metadata synchronously. Loose source
 open records the root without recursively scanning it.
@@ -344,7 +350,12 @@ with per-handle serialization, just like an explicitly selected reader.
 
 
 `pg_reader_open(file, representation, ...)` fixes one physical copy and starts
-at zero. Logical mode decodes; stored mode returns the exact stored payload,
+at zero. `PG_READ_LOGICAL` automatically serves opaque cached-header bytes when
+the entire requested range, clamped to logical EOF, fits in the cached prefix.
+A crossing request reads payload bytes only. Cached bytes are trusted and are
+not compared with the payload; a cache may be longer than the logical file,
+but bytes beyond logical EOF are never exposed. `PG_READ_LOGICAL_PAYLOAD`
+always returns decoded payload bytes. Stored mode returns the exact stored payload,
 with reader metadata describing its encoding and exposed length. Stored EOF
 still validates decoding, logical length and the available profile-selected
 digest. `PG_READ_STORED_UNCHECKED` instead returns stored bytes without
@@ -356,7 +367,12 @@ Positive reads return up to capacity. The final nonempty read validates before
 OK; completed OK with positive capacity always delivers at least one byte.
 Subsequent positive reads return END/0. Empty files validate and return END/0
 on the first positive read. A zero-capacity read is OK/0 without verification.
-Reader calls complete before returning. Errors may
+EOF verification checks the underlying payload, including when every returned
+byte came from a cache; it does not authenticate cached bytes. Explicit
+verification and bulk copy, export, pack, unpack and compaction use payload
+bytes independently of cached metadata. Whole-file `read_all` and
+`read_all_alloc` helpers use ordinary logical reads and can therefore return
+cached bytes. Reader calls complete before returning. Errors may
 follow delivered bytes; counts remain exact and the reader becomes close-only.
 Closing early does not imply verification. Explicit `pg_file_verify` reports
 NO_CHECKSUM when none is stored; ordinary complete reads permit its absence.
@@ -374,8 +390,15 @@ output without exposing more than the declared logical size to the caller.
 Only submit a new chunk after the previous call returns. Validation,
 decoding, hashing, compression and publication are shared stages.
 
-Entry options default to epoch timestamp, AUTO compression, no expected digest,
-no cached header and no original-name override. The API never reads the clock
+Entry options default to epoch timestamp, AUTO compression and header caching,
+no expected digest and no original-name override. Checked archive writes infer
+supported resource prefixes from logical bytes, including encoded input.
+`PG_HEADER_CACHE_NONE` suppresses caching and rejects a nonempty supplied span.
+`PG_HEADER_CACHE_EXPLICIT` preserves the supplied span, including an empty one.
+With `PG_HEADER_CACHE_AUTO`, a nonempty supplied span overrides inference.
+Native and loose writes do not infer headers. Invalid inferred lengths reject
+the write before publication; the archive policy accepts declared lengths up
+to 2 MiB before the format-specific adjustment. The API never reads the clock
 implicitly. The initializer derives
 both lengths for streaming logical input; memory helpers derive them from
 size. Output hashing remains required by archive formats even without an
@@ -417,7 +440,8 @@ finish input reads before publishing the replacement. Source-copy helpers
 preserve mtime and archive cached headers, omit cached headers for loose
 output, use canonical names for additions, and keep existing original names
 for replacements. Archive-copy helpers can preserve input original spelling
-when it normalizes to the target name.
+when it normalizes to the target name. Copies preserve even an absent header;
+they do not infer a replacement header from an existing archive entry.
 
 ## Composed whole-file tasks
 
@@ -876,6 +900,8 @@ The digest domain must match the builder profile. Full MD5 is accepted by both
 formats; the four-byte MD5 prefix is accepted only by HOGG. Unused digest bytes
 must be zero. Name, timestamp, header, ownership, format limits and duplicate
 rules match the checked entry writer. Opening copies all borrowed metadata.
+The supplied cached-header span is explicit, including when empty; accepted
+stored transfers never decode payloads to infer a header.
 
 This follows MiniZip's explicit [raw transfer interface][minizip-raw]: callers
 supply the logical length and checksum alongside already encoded bytes. The
@@ -883,3 +909,48 @@ caller owns payload acceptance. Ordinary readers and writers remain checked;
 archive metadata and the internal DataList retain their checked behavior.
 
 [minizip-raw]: https://raw.githubusercontent.com/madler/zlib/develop/contrib/minizip/zip.h
+
+## Standalone resource headers and cache containers
+
+`header_cache.h` and its procedural C++ imports work without a context, source,
+tree or archive builder. `pg_header_cache_classify` examines the exact final
+extension, ignoring ASCII case, and returns a plain recipe:
+
+| Extension | Recipe | Adjustment |
+| --- | --- | --- |
+| `.anm`, `.geo`, `.geolm`, `.lgeo` | First unsigned little-endian word | +4 |
+| `.bgeo` | First unsigned big-endian word | +4 |
+| `.texture`, `.anim` | First unsigned little-endian word | 0 |
+| `.lm2` | Fixed prefix | 29 bytes |
+| Every other extension, including `.wtex` and `.dcache` | None | 0 |
+
+`pg_header_cache_probe` resolves a recipe from a supplied logical prefix and
+the complete logical size. Resources shorter than four bytes, or with a zero
+first word, have no inferred header. Otherwise four available bytes suffice
+to determine the length; an insufficient prefix returns `PG_CAPACITY`.
+A length exceeding the logical file is `PG_CORRUPT`. The standalone probe has
+no archive policy cap. `pg_header_cache_extract` composes inference and a copy
+of the complete prefix into a `pg_buffer`, with an explicit caller size limit;
+an absent header succeeds with NULL/0, and every failure returns no buffer.
+These operations interpret logical bytes before compression and perform no I/O.
+The zero-word gate therefore behaves consistently for raw and encoded input;
+the legacy compressed-input quirk that could cache four zero bytes is not
+reproduced.
+
+`pg_header_cache_encode` serializes a supplied array of opaque spans as a
+complete `PG_HEADER_CACHE_PIGG_POOL` or decoded version-zero
+`PG_HEADER_CACHE_HOGG_DATALIST`. `pg_header_cache_decode` validates one complete
+container and owns a private copy independent of the input. Both preserve slot
+order and empty entries, including sparse DataList holes; neither deduplicates
+or inserts names. `count` includes empty slots; `get` returns an immutable span
+borrowing the decoded handle and returns `PG_END` beyond its count. Close that
+handle with `pg_header_cache_close`; release encoded bytes with `pg_buffer_free`.
+
+The codecs reject wrong discriminators, invalid lengths/counts, truncation and
+trailing bytes with `PG_CORRUPT`. Unknown codec values are `PG_INVALID`;
+unrepresentable counts, lengths or allocation sizes are `PG_LIMIT`.
+Encoded counts and element lengths fit unsigned 32-bit fields; PIGG framed
+element bytes together also fit its unsigned 32-bit body-length field.
+Empty spans use NULL/0 and retain their IDs. These codecs do not compress,
+verify archive digests, validate names or replay journals; archive adapters
+retain those responsibilities while sharing the same framing implementation.

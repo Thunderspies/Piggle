@@ -844,9 +844,11 @@ static int test_pigg_edit(void)
 				sizeof(data), &count, &error),
 		PG_OK);
 	PG_CHECK(count == 3 && memcmp(data, "new", 3) == 0);
-	PG_STATUS(pg_source_read_all(source, "b.txt", data,
-				sizeof(data), &count, &error),
+	PG_STATUS(pg_reader_open_source(source, "b.txt",
+		PG_READ_LOGICAL_PAYLOAD, &reader, &error), PG_OK);
+	PG_STATUS(pg_reader_read(reader, data, sizeof(data), &count, &error),
 		PG_OK);
+	PG_STATUS(pg_reader_close(&reader, &error), PG_OK);
 	PG_CHECK(count == 3 && memcmp(data, "bbb", 3) == 0);
 	PG_STATUS(
 		pg_source_find(source, "b.txt", &file, &error), PG_OK);
@@ -1031,9 +1033,11 @@ static int test_hogg_update(void)
 		info.cached_header_size == 4 &&
 		memcmp(info.cached_header, "head", 4) == 0);
 	PG_STATUS(pg_file_close(&file, &error), PG_OK);
-	PG_STATUS(pg_source_read_all(source, "c.txt", data,
-				sizeof(data), &count, &error),
+	PG_STATUS(pg_reader_open_source(source, "c.txt",
+		PG_READ_LOGICAL_PAYLOAD, &reader, &error), PG_OK);
+	PG_STATUS(pg_reader_read(reader, data, sizeof(data), &count, &error),
 		PG_OK);
+	PG_STATUS(pg_reader_close(&reader, &error), PG_OK);
 	PG_CHECK(count == 3 && memcmp(data, "ccc", 3) == 0);
 	entry.cached_header = "next";
 	PG_STATUS(pg_source_write_all(
@@ -1086,6 +1090,7 @@ static int test_hogg_flush(void)
 	pg_archive_builder *builder = NULL;
 	pg_source *source = NULL;
 	pg_file *file = NULL;
+	pg_reader *reader = NULL;
 	pg_file_info info;
 	pg_error error;
 	pg_entry_options entry;
@@ -1124,9 +1129,11 @@ static int test_hogg_flush(void)
 		memcmp(info.cached_header, header, sizeof(header)) ==
 			0);
 	PG_STATUS(pg_file_close(&file, &error), PG_OK);
-	PG_STATUS(pg_source_read_all(source, "a.txt", data,
-				sizeof(data), &count, &error),
+	PG_STATUS(pg_reader_open_source(source, "a.txt",
+		PG_READ_LOGICAL_PAYLOAD, &reader, &error), PG_OK);
+	PG_STATUS(pg_reader_read(reader, data, sizeof(data), &count, &error),
 		PG_OK);
+	PG_STATUS(pg_reader_close(&reader, &error), PG_OK);
 	PG_CHECK(count == 3 && memcmp(data, "two", 3) == 0);
 	PG_STATUS(pg_source_close(&source, &error), PG_OK);
 	PG_STATUS(pg_context_close(&context, &error), PG_OK);

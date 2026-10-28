@@ -181,6 +181,15 @@ The `BUILD-001` through `BUILD-005` acceptance scenarios in
 with an unrelated reader, compaction, checkpoint-only resume and suspension.
 C11 and procedural C++ consumer fixtures cover each public addition.
 
+Header-cache unit cases cover exact extension recipes, prefix inference and
+bounds, automatic/explicit/suppressed writes, logical and encoded input, cache
+reads and payload-only reads, seeks, EOF payload verification, and independent
+PIGG-pool/HOGG-DataList codecs with binary bytes and empty slots.
+`features/header_cache.feature` exercises automatic caching in both archive
+formats, caller overrides, standalone extraction and independent container
+roundtrips. Original-implementation interoperability checks are one-off external
+verification and are deliberately excluded from automated repository tests.
+
 ## Scaling benchmark
 
 ```sh

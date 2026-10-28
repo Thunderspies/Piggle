@@ -187,6 +187,14 @@ A pathname slot includes its terminating NUL in `byte_length`, has at least two
 bytes, ends in exactly one NUL, and has no earlier NUL. A cached-header slot is
 opaque and nonempty. The DataList itself does not distinguish the two uses.
 
+The standalone `PG_HEADER_CACHE_HOGG_DATALIST` codec reads and writes this
+decoded base framing, retaining every slot index and free slot. It treats
+nonempty bytes as opaque and does not validate pathname references, compress,
+verify the containing file checksum, or apply a journal. Archive readers and
+writers compose those operations around the shared framing implementation.
+Resource-prefix inference is a separate
+[library policy](api.md#standalone-resource-headers-and-cache-containers).
+
 ### DataList journal
 
 The DataList journal starts at `24 + op_journal_size`. Its 12-byte header is:

@@ -174,6 +174,13 @@ reader even accepts a zero-length cached-header element, though the canonical
 writer never emits one and represents a missing or empty header with
 `cached_header_id == 0xffffffff`.
 
+The standalone `PG_HEADER_CACHE_PIGG_POOL` codec reads and writes this complete
+12-byte-header framing with magic `0x9abc`, preserving all indices and empty
+elements. It does not need an archive or associate elements with file records.
+Automatic resource-prefix selection is library policy described in the
+[API contract](api.md#standalone-resource-headers-and-cache-containers), rather
+than a constraint on these opaque wire bytes.
+
 The canonical writer emits exactly one pathname element per file record, in
 record order, so `pathname_id == record index`. It emits only nonempty cached
 headers, also in record order, and assigns their dense zero-based indices to

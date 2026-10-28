@@ -64,8 +64,9 @@ typedef struct pg_error {
 	char message[192]; /* NUL-terminated; diagnostic, not a parsing API. */
 } pg_error;
 
-/* Owned binary result of read_all_alloc. Initialize to {NULL, 0} before use.
- * data is writable, size is the logical byte length, with no NUL terminator.
+/* Owned binary result of allocated reads, header extraction and cache encoding.
+ * Initialize to {NULL, 0} before use.
+ * data is writable, size is the returned byte length, with no NUL terminator.
  * Empty success and every failure yield {NULL, 0}; status distinguishes them.
  * Never free/realloc data directly. Fields are unchanged except ownership
  * transfer: copy the pair and reset the original to empty; never duplicate it.
@@ -98,8 +99,16 @@ enum { PG_LOGICAL = 0, PG_ZLIB }; /* Write input / stored representation. */
 /* Digest domain is independent of encoding and reader representation. */
 enum { PG_CHECKSUM_LOGICAL = 0, PG_CHECKSUM_STORED };
 enum { PG_DIGEST_NONE = 0, PG_DIGEST_MD5, PG_DIGEST_MD5_32 };
-/* Unchecked stored reads retain identity/bounds checks, skip payload checks. */
-enum { PG_READ_LOGICAL = 0, PG_READ_STORED, PG_READ_STORED_UNCHECKED };
+/* LOGICAL trusts a stored header for requests wholly within its prefix.
+ * LOGICAL_PAYLOAD always reads the payload. Both verify payload at EOF.
+ * Unchecked stored reads retain identity/bounds checks, skip payload checks.
+ */
+enum {
+	PG_READ_LOGICAL = 0,
+	PG_READ_STORED,
+	PG_READ_STORED_UNCHECKED,
+	PG_READ_LOGICAL_PAYLOAD
+};
 /* Native creation is exclusive by default. Never overwrite links/specials. */
 enum { PG_OVERWRITE = 1u };
 
@@ -139,8 +148,19 @@ typedef struct pg_file_info {
 	size_t cached_header_size;
 } pg_file_info;
 
+/* Checked archive writes infer a prefix by default. NONE disables caching;
+ * EXPLICIT preserves the supplied span, including an empty span. AUTO also
+ * accepts a nonempty supplied span as an override. NONE with a nonempty
+ * span is INVALID. Native/loose writes never infer a header.
+ */
+enum {
+	PG_HEADER_CACHE_AUTO = 0,
+	PG_HEADER_CACHE_NONE,
+	PG_HEADER_CACHE_EXPLICIT
+};
+
 /* Metadata/policy shared by memory and streaming writes. Zero-init means
- * epoch mtime, AUTO compression, no expected digest/header/name override.
+ * epoch mtime, AUTO compression/header caching, no expected digest/name.
  * original_name, if provided, must normalize to the target virtual name.
  * Existing copies preserve original_name; an override there is INVALID.
  * cached_header may be NULL only at size=0; empty spans are never accessed.
@@ -155,6 +175,7 @@ typedef struct pg_entry_options {
 	const char *original_name;
 	const void *cached_header;
 	size_t cached_header_size;
+	uint32_t cached_header_policy;
 } pg_entry_options;
 /* Complete lengths required. LOGICAL requires input_size==logical_size.
  * ZLIB means one RFC 1950 stream with no trailing data. Use the initializer

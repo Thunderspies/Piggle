@@ -185,7 +185,7 @@ PG_API pg_status PG_CALL pg_file_export(pg_file *file,
 		if (memcmp(file->info.digest, zero, sizeof(zero)) == 0)
 			options.entry.digest_kind = PG_DIGEST_NONE;
 		status = pg_reader_open(
-			file, PG_READ_LOGICAL, &reader, &work_error);
+			file, PG_READ_LOGICAL_PAYLOAD, &reader, &work_error);
 		if (status != PG_OK)
 			goto export_done;
 		status = pg_writer_open_native(file->source->context,

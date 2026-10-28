@@ -3,6 +3,7 @@
 
 #include "internal.hpp"
 #include "digest.hpp"
+#include "header_cache_internal.hpp"
 
 static inline void pg_wire_u16(uint8_t *out, uint16_t value)
 {
@@ -58,6 +59,81 @@ static inline const char *pg_wire_name(const pg_builder_entry *entry)
 {
 	return entry->original_name ? entry->original_name :
 		entry->canonical_name;
+}
+
+enum {
+	PG_FRAME_NAMES,
+	PG_FRAME_HEADERS,
+	PG_FRAME_DATALIST
+};
+
+struct pg_archive_frame_cursor {
+	pg_archive_builder *builder;
+	pg_builder_entry *entry;
+	uint32_t index;
+	uint32_t kind;
+	int header;
+};
+
+static inline pg_status pg_archive_frame_span(void *state, uint32_t index,
+	pg_header_cache_span *out)
+{
+	pg_archive_frame_cursor *cursor = (pg_archive_frame_cursor *)state;
+
+	if (!index) {
+		cursor->entry = cursor->builder->entries;
+		cursor->index = 0;
+		cursor->header = 0;
+	}
+	if (cursor->kind == PG_FRAME_HEADERS) {
+		while (cursor->entry && !cursor->entry->cached_header_size)
+			cursor->entry = cursor->entry->next;
+	}
+	while (cursor->index < index) {
+		if (!cursor->entry)
+			return PG_INVALID;
+		if (cursor->kind == PG_FRAME_DATALIST && !cursor->header &&
+			cursor->entry->cached_header_size) {
+			cursor->header = 1;
+		} else {
+			cursor->entry = cursor->entry->next;
+			cursor->header = 0;
+			if (cursor->kind == PG_FRAME_HEADERS) {
+				while (cursor->entry &&
+					!cursor->entry->cached_header_size)
+					cursor->entry = cursor->entry->next;
+			}
+		}
+		cursor->index++;
+	}
+	if (!cursor->entry) {
+		if (cursor->kind != PG_FRAME_DATALIST)
+			return PG_INVALID;
+		out->data = "?DataList";
+		out->size = 10;
+	} else if (cursor->kind == PG_FRAME_HEADERS || cursor->header) {
+		out->data = cursor->entry->cached_header;
+		out->size = cursor->entry->cached_header_size;
+	} else {
+		out->data = pg_wire_name(cursor->entry);
+		out->size = strlen((const char *)out->data) + 1;
+	}
+	return PG_OK;
+}
+
+struct pg_archive_frame_sink {
+	FILE *stream;
+	pg_md5 *hash;
+};
+
+static inline pg_status pg_archive_frame_write(void *state,
+	const void *data, size_t size)
+{
+	pg_archive_frame_sink *sink = (pg_archive_frame_sink *)state;
+
+	if (sink->hash)
+		pg_md5_update(sink->hash, data, size);
+	return sink->stream ? pg_wire_write(sink->stream, data, size) : PG_OK;
 }
 
 static inline pg_status pg_wire_payload(FILE *out,
@@ -133,7 +209,6 @@ static inline pg_status pg_pigg_write(pg_archive_builder *builder, FILE *out)
 	uint32_t header_index = 0;
 	pg_builder_entry *entry;
 	uint8_t archive_header[16] = {};
-	uint8_t pool_header[12] = {};
 	pg_status status = pg_pigg_measure(builder, &count, &names,
 		&headers, &base);
 
@@ -165,34 +240,20 @@ static inline pg_status pg_pigg_write(pg_archive_builder *builder, FILE *out)
 			return PG_IO;
 		payload_offset += (uint32_t)entry->stored_size;
 	}
-	pg_wire_u32(pool_header, 0x6789);
-	pg_wire_u32(pool_header + 4, count);
-	pg_wire_u32(pool_header + 8, names);
-	if (pg_wire_write(out, pool_header, sizeof(pool_header)) != PG_OK)
-		return PG_IO;
-	for (entry = builder->entries; entry; entry = entry->next) {
-		const char *name = pg_wire_name(entry);
-		uint32_t size = (uint32_t)strlen(name) + 1;
+	pg_archive_frame_cursor cursor = {builder, NULL, 0, PG_FRAME_NAMES, 0};
+	pg_archive_frame_sink sink = {out, NULL};
 
-		if (pg_wire_u32_write(out, size) != PG_OK ||
-			pg_wire_write(out, name, size) != PG_OK)
-			return PG_IO;
-	}
-	memset(pool_header, 0, sizeof(pool_header));
-	pg_wire_u32(pool_header, 0x9abc);
-	pg_wire_u32(pool_header + 4, header_index);
-	pg_wire_u32(pool_header + 8, headers);
-	if (pg_wire_write(out, pool_header, sizeof(pool_header)) != PG_OK)
-		return PG_IO;
-	for (entry = builder->entries; entry; entry = entry->next) {
-		if (!entry->cached_header_size)
-			continue;
-		if (pg_wire_u32_write(out,
-			(uint32_t)entry->cached_header_size) != PG_OK ||
-			pg_wire_write(out, entry->cached_header,
-			entry->cached_header_size) != PG_OK)
-			return PG_IO;
-	}
+	status = pg_cache_frame_emit(PG_HEADER_CACHE_PIGG_POOL, 0x6789,
+		count, pg_archive_frame_span, &cursor,
+		pg_archive_frame_write, &sink);
+	if (status != PG_OK)
+		return status;
+	cursor.kind = PG_FRAME_HEADERS;
+	status = pg_cache_frame_emit(PG_HEADER_CACHE_PIGG_POOL, 0x9abc,
+		header_index, pg_archive_frame_span, &cursor,
+		pg_archive_frame_write, &sink);
+	if (status != PG_OK)
+		return status;
 	for (entry = builder->entries; entry; entry = entry->next) {
 		if (pg_wire_payload(out, builder, entry) != PG_OK)
 			return PG_IO;
@@ -251,51 +312,21 @@ static inline pg_status pg_hogg_measure(pg_archive_builder *builder,
 	return PG_OK;
 }
 
-static inline pg_status pg_hogg_emit(FILE *out, pg_md5 *hash,
-		const void *data, size_t size)
-{
-	pg_md5_update(hash, data, size);
-	return out ? pg_wire_write(out, data, size) : PG_OK;
-}
-
-static inline pg_status pg_hogg_element(FILE *out, pg_md5 *hash,
-		const void *data, uint32_t size)
-{
-	uint8_t length[4];
-
-	pg_wire_u32(length, size);
-	if (pg_hogg_emit(out, hash, length, sizeof(length)) != PG_OK ||
-		pg_hogg_emit(out, hash, data, size) != PG_OK)
-		return PG_IO;
-	return PG_OK;
-}
-
 static inline pg_status pg_hogg_datalist(pg_archive_builder *builder,
 		FILE *out, uint32_t slots, uint8_t digest[16])
 {
-	static const char internal_name[10] = "?DataList";
-	uint8_t header[8] = {};
 	pg_md5 hash;
-	pg_builder_entry *entry;
+	pg_archive_frame_cursor cursor = {
+		builder, NULL, 0, PG_FRAME_DATALIST, 0};
+	pg_archive_frame_sink sink = {out, &hash};
 
-	pg_wire_u32(header + 4, slots);
 	pg_md5_init(&hash);
-	if (pg_hogg_emit(out, &hash, header, sizeof(header)) != PG_OK)
-		return PG_IO;
-	for (entry = builder->entries; entry; entry = entry->next) {
-		const char *name = pg_wire_name(entry);
-		uint32_t size = (uint32_t)strlen(name) + 1;
+	pg_status status = pg_cache_frame_emit(PG_HEADER_CACHE_HOGG_DATALIST,
+		0, slots, pg_archive_frame_span, &cursor,
+		pg_archive_frame_write, &sink);
 
-		if (pg_hogg_element(out, &hash, name, size) != PG_OK)
-			return PG_IO;
-		if (entry->cached_header_size &&
-			pg_hogg_element(out, &hash, entry->cached_header,
-			(uint32_t)entry->cached_header_size) != PG_OK)
-			return PG_IO;
-	}
-	if (pg_hogg_element(out, &hash, internal_name,
-		sizeof(internal_name)) != PG_OK)
-		return PG_IO;
+	if (status != PG_OK)
+		return status;
 	pg_md5_finish(&hash, digest);
 	return PG_OK;
 }
