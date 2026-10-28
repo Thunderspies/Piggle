@@ -1458,6 +1458,7 @@ void pg_tree_sources_discard(pg_tree *tree, pg_tree_source_state *saved)
 	if (!saved)
 		return;
 	for (size_t i = 0; i < tree->count; i++) {
+		free(saved[i].slot_index);
 		pg_tree_records_free(saved[i].records);
 		pg_tree_requests_free(saved[i].exact_requests);
 		pg_tree_requests_free(saved[i].prefix_requests);
@@ -1501,6 +1502,16 @@ static pg_status pg_tree_sources_save_mode(pg_tree *tree,
 			if (status != PG_OK)
 				goto save_failed;
 		}
+		pg_source probe = {};
+
+		probe.format = source->format;
+		probe.records = saved[i].records;
+		pg_status indexed = pg_source_slots_prepare(&probe);
+
+		saved[i].slot_index = probe.slot_index;
+		saved[i].slot_capacity = probe.slot_capacity;
+		if (indexed != PG_OK)
+			goto save_failed;
 		if (source->exact_requests) {
 			saved[i].exact_requests =
 				pg_tree_requests_clone(
@@ -1575,6 +1586,11 @@ void pg_tree_sources_restore(pg_tree *tree, pg_tree_source_state *saved)
 			tail->next = source->records;
 			source->records = saved[i].records;
 		}
+		free(source->slot_index);
+		source->slot_index = saved[i].slot_index;
+		source->slot_capacity = saved[i].slot_capacity;
+		saved[i].slot_index = NULL;
+		saved[i].slot_capacity = 0;
 		source->exact_requests = saved[i].exact_requests;
 		source->prefix_requests = saved[i].prefix_requests;
 		source->shallow_requests = saved[i].shallow_requests;

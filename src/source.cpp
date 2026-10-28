@@ -292,6 +292,12 @@ static pg_status pg_hogg_record_prepare(
 		source->record_index = grown;
 		source->record_capacity = capacity;
 	}
+	pg_status status = pg_source_slots_reserve(source, (size_t)slot + 1);
+
+	if (status != PG_OK) {
+		pg_record_release(record);
+		return status;
+	}
 	*out = record;
 	return PG_OK;
 }
@@ -387,6 +393,7 @@ static void pg_hogg_record_publish(
 			if (old->next)
 				old->next->previous = old->previous;
 			cache->records[slot] = NULL;
+			source->slot_index[slot] = NULL;
 			pg_record_release(old);
 		}
 	} else if (prepared) {
@@ -413,6 +420,7 @@ static void pg_hogg_record_publish(
 			source->records->previous = prepared;
 		source->records = prepared;
 		cache->records[slot] = prepared;
+		source->slot_index[slot] = prepared;
 		source->context->next_id++;
 	}
 	source->generation++;
@@ -2142,6 +2150,9 @@ static pg_status pg_source_release_coordinated(
 	pg_context_child_drop(source->context);
 	pg_source_index_clear(source);
 	pg_source_hogg_cache_clear(source);
+	free(source->slot_index);
+	source->slot_index = NULL;
+	source->slot_capacity = 0;
 	pg_source_records_free(source->records);
 	pg_source_requests_free(source->exact_requests);
 	pg_source_requests_free(source->prefix_requests);
@@ -2614,6 +2625,8 @@ static pg_status pg_source_pigg_clone(pg_source *source,
 		goto pigg_done;
 	}
 	probe = *source;
+	probe.slot_index = NULL;
+	probe.slot_capacity = 0;
 	probe.record_index = NULL;
 	probe.record_count = 0;
 	probe.fd = fd;
@@ -2678,6 +2691,7 @@ static pg_status pg_source_pigg_clone(pg_source *source,
 	source->generation++;
 	pg_source_index_clear(source);
 	pg_source_records_free(source->records);
+	pg_source_slots_take(source, &probe);
 	source->records = probe.records;
 	probe.records = NULL;
 #ifdef _WIN32
@@ -2716,8 +2730,10 @@ pigg_done:
 	free(records);
 	free(names);
 	free(headers);
-	if (status != PG_OK && status != PG_COMMITTED && probe.records)
+	if (status != PG_OK && status != PG_COMMITTED && probe.records) {
+		free(probe.slot_index);
 		pg_source_records_free(probe.records);
+	}
 	pg_native_result(status, native_code, error);
 	if (status == PG_COMMITTED && error)
 		error->cause = PG_IO;
@@ -2737,13 +2753,10 @@ static pg_status pg_source_pigg_delete_coordinated(
 	if (!pg_native_stat_same(
 			&file->source_identity, &source->identity))
 		return pg_result(PG_STALE, error);
-	for (record = source->records; record; record = record->next) {
-		if (record->info.copy_id == file->info.copy_id &&
-			record->info.copy_generation ==
-				file->info.copy_generation)
-			break;
-	}
-	if (!record)
+	record = pg_source_copy_record(source, file->info.archive_record,
+		file->info.copy_id);
+	if (!record || record->info.copy_generation !=
+			file->info.copy_generation)
 		return pg_result(PG_STALE, error);
 	return pg_source_pigg_clone(source, NULL, NULL,
 		(uint32_t)record->info.archive_record, UINT32_MAX,
@@ -2793,13 +2806,10 @@ static pg_status pg_source_hogg_delete_locked(
 	if (!pg_native_stat_same(&source->identity, &current) ||
 		!pg_native_stat_same(&current, &path_state))
 		return pg_result(PG_STALE, error);
-	for (record = source->records; record; record = record->next) {
-		if (record->info.copy_id == file->info.copy_id &&
-			record->info.copy_generation ==
-				file->info.copy_generation)
-			break;
-	}
-	if (!record)
+	record = pg_source_copy_record(source, file->info.archive_record,
+		file->info.copy_id);
+	if (!record || record->info.copy_generation !=
+			file->info.copy_generation)
 		return pg_result(PG_STALE, error);
 	status = pg_read_span(source->fd, (uint64_t)current.st_size, 0,
 		header, sizeof(header));
@@ -3870,6 +3880,7 @@ PG_API pg_status PG_CALL pg_source_open(pg_context *context,
 
 	cleanup:
 		close(source->fd);
+		free(source->slot_index);
 		pg_source_index_clear(source);
 		pg_source_records_free(source->records);
 		free(source->native_path);
@@ -4948,6 +4959,8 @@ static pg_status pg_source_rescan_locked(
 		!pg_native_stat_same(&current, &path_state))
 		return pg_result(PG_STALE, error);
 	probe = *source;
+	probe.slot_index = NULL;
+	probe.slot_capacity = 0;
 	probe.record_index = NULL;
 	probe.record_count = 0;
 	probe.records = NULL;
@@ -4958,17 +4971,20 @@ static pg_status pg_source_rescan_locked(
 	if (status != PG_OK) {
 		if (status == PG_RECOVERY_REQUIRED)
 			source->recovery_required = 1;
+		free(probe.slot_index);
 		pg_source_records_free(probe.records);
 		return pg_result(status, error);
 	}
 	if (fstat(source->fd, &final) ||
 		lstat(source->native_path, &path_state)) {
 		native_code = errno;
+		free(probe.slot_index);
 		pg_source_records_free(probe.records);
 		return pg_native_result(PG_IO, native_code, error);
 	}
 	if (!pg_native_stat_same(&current, &final) ||
 		!pg_native_stat_same(&final, &path_state)) {
+		free(probe.slot_index);
 		pg_source_records_free(probe.records);
 		return pg_result(PG_RETRY, error);
 	}
@@ -4977,6 +4993,7 @@ static pg_status pg_source_rescan_locked(
 	if (invalidate ||
 		!pg_native_stat_same(&source->identity, &current)) {
 		if (generation == UINT64_MAX) {
+			free(probe.slot_index);
 			pg_source_records_free(probe.records);
 			return pg_result(PG_LIMIT, error);
 		}
@@ -4989,6 +5006,7 @@ static pg_status pg_source_rescan_locked(
 	matches = (pg_source_record **)malloc(
 		(match_count ? match_count : 1) * sizeof(*matches));
 	if (!matches) {
+		free(probe.slot_index);
 		pg_source_records_free(probe.records);
 		return pg_result(PG_NOMEM, error);
 	}
@@ -5060,7 +5078,11 @@ static pg_status pg_source_rescan_locked(
 	free(matches);
 	pg_source_index_clear(source);
 	pg_source_hogg_cache_clear(source);
+	free(source->slot_index);
+	source->slot_index = NULL;
+	source->slot_capacity = 0;
 	pg_source_records_free(source->records);
+	pg_source_slots_take(source, &probe);
 	source->records = probe.records;
 	source->identity = current;
 	source->generation = generation;
@@ -5069,6 +5091,7 @@ static pg_status pg_source_rescan_locked(
 
 limit:
 	free(matches);
+	free(probe.slot_index);
 	pg_source_records_free(probe.records);
 	return pg_result(PG_LIMIT, error);
 }

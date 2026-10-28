@@ -217,7 +217,7 @@ fail:
 	return status;
 }
 
-static inline pg_status pg_pigg_index(pg_source *source)
+static inline pg_status pg_pigg_index_records(pg_source *source)
 {
 	uint8_t header[16];
 	uint64_t file_size = (uint64_t)source->identity.st_size;
@@ -500,7 +500,7 @@ fail:
 	return status;
 }
 
-static inline pg_status pg_hogg_index(pg_source *source)
+static inline pg_status pg_hogg_index_records(pg_source *source)
 {
 	uint64_t file_size = (uint64_t)source->identity.st_size;
 	uint8_t header[24];
@@ -784,6 +784,20 @@ cleanup:
 	free(data_bytes);
 	free(journal_bytes);
 	return status;
+}
+
+static inline pg_status pg_pigg_index(pg_source *source)
+{
+	pg_status status = pg_pigg_index_records(source);
+
+	return status == PG_OK ? pg_source_slots_prepare(source) : status;
+}
+
+static inline pg_status pg_hogg_index(pg_source *source)
+{
+	pg_status status = pg_hogg_index_records(source);
+
+	return status == PG_OK ? pg_source_slots_prepare(source) : status;
 }
 
 static inline pg_status pg_archive_verify_payload(int fd,
