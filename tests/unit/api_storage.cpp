@@ -6,6 +6,38 @@ namespace
 using ApiStorage = piggle_test::ContractTest;
 #define EXPECT_STATUS(call, expected) ASSERT_EQ(expected, call)
 
+TEST_F(ApiStorage, InspectAcrossPhysicalTableWindowBoundaries)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *source = NULL;
+	pg_archive_build_options options = {{PG_HOGG10, 0, 0}, NULL, 5000};
+
+	ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_create_config(context,
+		"windows.hogg", &options, &builder, NULL));
+	for (size_t i = 0; i < 4097; i++) {
+		char name[32];
+
+		snprintf(name, sizeof(name), "file%05zu", i);
+		ASSERT_EQ(PG_OK, pg_archive_builder_write_all(builder, name,
+			"x", 1, NULL, NULL));
+	}
+	ASSERT_EQ(PG_OK, pg_archive_builder_finish(builder, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_close(&builder, NULL));
+	ASSERT_EQ(PG_OK, pg_source_open(context, "windows.hogg", NULL,
+		&source, NULL));
+	pg_source_storage_info info = {};
+
+	ASSERT_EQ(PG_OK, pg_source_storage_inspect(source, &info, NULL));
+	EXPECT_EQ(4097u, info.live_payload_bytes);
+	EXPECT_EQ(info.physical_length, info.metadata_bytes +
+		info.live_payload_bytes + info.unreferenced_bytes);
+	EXPECT_EQ(0u, info.unreferenced_bytes);
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+}
+
 TEST_F(ApiStorage, CompactVisibleWinners)
 {
 	pg_context *context = NULL;

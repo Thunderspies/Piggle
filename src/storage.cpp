@@ -94,13 +94,18 @@ static pg_status pg_storage_measure(
 		uint64_t table =
 			24 + pg_read_u16(header + 6) + pg_read_u16(header + 20);
 
+		pg_table_window window = {};
+
 		for (uint32_t i = 0; i < files; i++) {
-			status = pg_read_span(source->fd, size,
-				table + 32 * (uint64_t)i, disk, sizeof(disk));
+			const uint8_t *row;
+
+			status = pg_table_row(source->fd, size, table,
+				pg_read_u32(header + 8), 32 * (uint64_t)i,
+				32, &window, &row);
 			if (status != PG_OK)
 				break;
-			uint32_t length = pg_read_u32(disk + 8);
-			uint64_t offset = pg_read_u64(disk);
+			uint32_t length = pg_read_u32(row + 8);
+			uint64_t offset = pg_read_u64(row);
 
 			if (!length || length == UINT32_MAX)
 				continue;
