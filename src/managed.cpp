@@ -340,6 +340,11 @@ static pg_status pg_hint_refresh_descendants(pg_tree *tree,
 
 pg_status pg_tree_hints_reconcile(pg_tree *tree, pg_error *error)
 {
+	int handled = 0;
+	pg_status exact = pg_tree_exact_changes(tree, &handled, error);
+
+	if (exact != PG_OK || handled)
+		return exact;
 	int changed = 0;
 	pg_status status = PG_OK;
 	pg_tree_source_state *saved = NULL;

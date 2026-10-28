@@ -58,9 +58,14 @@ static pg_status pg_source_index_get(
 			return PG_NOMEM;
 		size_t i = 0;
 
+		pg_source_record *previous = NULL;
+
 		for (pg_source_record *r = source->records; r;
-			r = r->next)
+			r = r->next) {
+			r->previous = previous;
+			previous = r;
 			items[i++] = r;
+		}
 		qsort(items, size, sizeof(*items),
 			pg_source_record_order);
 		source->record_index = items;
@@ -2152,7 +2157,8 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 		if (found) {
 			found->info.copy_id = old->info.copy_id;
 			found->info.copy_generation = old->info.copy_generation;
-			if (!pg_native_stat_same(&found->identity, &old->identity))
+			if (!pg_native_stat_same(
+				&found->identity, &old->identity))
 				found->info.copy_generation++;
 		}
 	}
@@ -2198,6 +2204,99 @@ static pg_status pg_source_loose_scan_private(pg_source *source,
 	}
 	free(items);
 	return PG_OK;
+}
+
+/* Stage one canonical loose-file cut without publishing source metadata. */
+pg_status pg_source_exact_stage(pg_source *source, const char *name,
+		pg_source_record **out, pg_error *error)
+{
+	pg_source probe = *source;
+	int native_code = 0;
+
+	probe.records = NULL;
+	probe.record_index = NULL;
+	probe.record_count = probe.record_capacity = 0;
+	probe.children = NULL;
+	probe.child_count = probe.child_capacity = 0;
+	pg_status status = pg_source_loose_scan_private(&probe, name,
+		&native_code, 1, 2);
+
+	*out = status == PG_OK ? probe.records : NULL;
+	if (status != PG_OK)
+		pg_source_records_free(probe.records);
+	pg_source_index_clear(&probe);
+	return pg_native_result(status, native_code, error);
+}
+
+pg_status pg_source_exact_reserve(pg_source *source,
+		pg_source_edit *edits, size_t count)
+{
+	size_t additional = 0;
+
+	for (size_t i = 0; i < count; i++) {
+		pg_source_edit *edit = edits + i;
+
+		if (edit->source != source || edit->old || !edit->record)
+			continue;
+		pg_status status = pg_child_add_prepare(source, edit->record);
+
+		if (status != PG_OK)
+			return status;
+		if (edit->record->child_patch_count > SIZE_MAX - additional)
+			return PG_LIMIT;
+		additional += edit->record->child_patch_count;
+	}
+	if (additional > SIZE_MAX - source->child_count ||
+		source->child_count + additional >
+			SIZE_MAX / sizeof(*source->children))
+		return PG_LIMIT;
+	size_t capacity = source->child_count + additional;
+
+	if (capacity > source->child_capacity) {
+		pg_source_child *items = (pg_source_child *)realloc(
+			source->children, capacity * sizeof(*items));
+
+		if (!items)
+			return PG_NOMEM;
+		source->children = items;
+		source->child_capacity = capacity;
+	}
+	return PG_OK;
+}
+
+/* Source indexes already describe the final membership at publication. */
+void pg_source_exact_publish(pg_source_edit *edit)
+{
+	pg_source *source = edit->source;
+	pg_source_record *old = edit->old;
+	pg_source_record *record = edit->record;
+
+	if (old && record) {
+		pg_source_record saved = *old;
+
+		*old = *record;
+		old->next = saved.next;
+		old->previous = saved.previous;
+		*record = saved;
+		pg_record_release(record);
+	} else if (old) {
+		if (old->previous)
+			old->previous->next = old->next;
+		else
+			source->records = old->next;
+		if (old->next)
+			old->next->previous = old->previous;
+		pg_child_remove(source, old->info.canonical_name);
+		pg_record_release(old);
+	} else if (record) {
+		record->next = source->records;
+		record->previous = NULL;
+		if (source->records)
+			source->records->previous = record;
+		source->records = record;
+		pg_child_add_publish(source, record);
+	}
+	edit->record = NULL;
 }
 
 /* Rebind a managed root after replacement without traversing its files.

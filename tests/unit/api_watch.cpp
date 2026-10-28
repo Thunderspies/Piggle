@@ -1,4 +1,7 @@
 #include "../api_test.hpp"
+#ifdef PIGGLE_TEST_ALLOCATION_PATH
+#include <sys/wait.h>
+#endif
 
 namespace {
 
@@ -170,6 +173,25 @@ static int watch_contract()
 }
 
 using ApiWatch = piggle_test::ContractTest;
+
+#ifdef PIGGLE_TEST_ALLOCATION_PATH
+TEST_F(ApiWatch, ExactChangesRollbackAndRetryAllocationFailures)
+{
+	pid_t child = fork();
+
+	ASSERT_GE(child, 0);
+	if (!child) {
+		execl(PIGGLE_TEST_ALLOCATION_PATH, PIGGLE_TEST_ALLOCATION_PATH,
+			"watch", (char *)NULL);
+		_exit(127);
+	}
+	int status;
+
+	ASSERT_EQ(child, waitpid(child, &status, 0));
+	ASSERT_TRUE(WIFEXITED(status));
+	EXPECT_EQ(0, WEXITSTATUS(status));
+}
+#endif
 
 TEST_F(ApiWatch, api_watch_contract)
 {
