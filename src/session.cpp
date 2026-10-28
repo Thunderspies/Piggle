@@ -480,7 +480,7 @@ static pg_status pg_session_restore(pg_archive_builder *builder,
 	if (status == PG_OK && fstat(fd, &probe.identity))
 		status = PG_IO;
 	if (status == PG_OK)
-		status = pg_hogg_index(&probe);
+		status = pg_hogg_index_records(&probe);
 	uint64_t index = 0;
 
 	for (pg_source_record *record = probe.records;
