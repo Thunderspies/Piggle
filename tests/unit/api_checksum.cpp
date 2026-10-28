@@ -141,6 +141,91 @@ TEST_F(ApiChecksum, api_checksum)
 	ASSERT_EQ(0, checksum_contract());
 }
 
+static void sequential_read(pg_source *source, const char *name,
+		uint32_t mode, const unsigned char *data)
+{
+	pg_reader *reader = NULL;
+	pg_reader_info info = {};
+
+	ASSERT_EQ(PG_OK, pg_reader_open_source(source, name, mode,
+		&reader, NULL));
+	ASSERT_EQ(PG_OK, pg_reader_inspect(reader, &info, NULL));
+	uint64_t total = 0;
+	unsigned char bytes[17];
+	size_t count = 0;
+
+	for (;;) {
+		pg_status status = pg_reader_read(reader, bytes, sizeof(bytes),
+			&count, NULL);
+
+		if (status == PG_END)
+			break;
+		ASSERT_EQ(PG_OK, status);
+		if (mode != PG_READ_STORED) {
+			EXPECT_EQ(0, memcmp(bytes, data + total, count));
+		}
+		total += count;
+	}
+	EXPECT_EQ(info.size, total);
+	ASSERT_EQ(PG_END, pg_reader_read(reader, bytes, sizeof(bytes),
+		&count, NULL));
+	EXPECT_EQ(0u, count);
+	ASSERT_EQ(PG_OK, pg_reader_close(&reader, NULL));
+}
+
+TEST_F(ApiChecksum, SequentialChunksVerifyEveryCheckedRepresentation)
+{
+	pg_archive_options configs[] = {
+		{PG_PIGG2, 0, PG_CHECKSUM_LOGICAL},
+		{PG_HOGG10, 0, PG_CHECKSUM_LOGICAL},
+		{PG_HOGG10, 0, PG_CHECKSUM_STORED},
+	};
+
+	for (const auto &config : configs) {
+		for (uint32_t compression :
+				{PG_COMPRESS_NEVER, PG_COMPRESS_FORCE}) {
+			pg_context *context = NULL;
+			pg_archive_builder *builder = NULL;
+			pg_source *source = NULL;
+			pg_source_options open = {config.format, PG_READ,
+				config.checksum_domain};
+			pg_entry_options entry = {};
+
+			entry.compression = compression;
+			entry.cached_header_policy = PG_HEADER_CACHE_NONE;
+			ASSERT_EQ(0, clear_file("sequential"));
+			ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+			ASSERT_EQ(PG_OK, pg_archive_builder_create_options(
+				context, "sequential", &config, &builder, NULL));
+			std::vector<unsigned char> data(131077);
+
+			for (size_t i = 0; i < data.size(); i++)
+				data[i] = (unsigned char)(i * 37 + i / 251);
+			for (const char *name : {"empty", "data"}) {
+				size_t size = !strcmp(name, "empty")
+					? 0 : data.size();
+
+				ASSERT_EQ(PG_OK, pg_archive_builder_write_all(
+					builder, name, data.data(), size, &entry,
+					NULL));
+			}
+			ASSERT_EQ(PG_OK, pg_archive_builder_finish(builder, NULL));
+			ASSERT_EQ(PG_OK, pg_archive_builder_close(&builder, NULL));
+			ASSERT_EQ(PG_OK, pg_source_open(context, "sequential",
+				&open, &source, NULL));
+			for (const char *name : {"empty", "data"}) {
+				for (uint32_t mode : {PG_READ_LOGICAL,
+						PG_READ_LOGICAL_PAYLOAD,
+						PG_READ_STORED})
+					sequential_read(source, name, mode,
+						data.data());
+			}
+			ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+			ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+		}
+	}
+}
+
 } // namespace
 
 TEST_F(ApiChecksum, StoredTransferSkipsPayloadValidation)

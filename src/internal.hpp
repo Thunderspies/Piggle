@@ -2,6 +2,7 @@
 #define PIGGLE_INTERNAL_HPP
 
 #include <piggle/types.h>
+#include "digest.hpp"
 
 #include <stdlib.h>
 #include <string.h>
@@ -511,6 +512,10 @@ pg_status pg_source_retain(pg_source *source);
 pg_status pg_source_release(pg_source *source, int *native_code);
 
 struct pg_reader {
+	pg_md5 hash;
+	void *verifier;
+	int sequential;
+	pg_status verification_status;
 	pg_header_blob *header_blob;
 	pg_context *context;
 	pg_source *source;
