@@ -313,7 +313,7 @@ TEST(HeaderCache, EncodeChecksRepresentabilityBeforeReadingPayload)
 	EXPECT_EQ(PG_LIMIT, pg_header_cache_encode(
 		PG_HEADER_CACHE_PIGG_POOL, &huge, 1, &wire, nullptr));
 	EXPECT_EQ(nullptr, wire.data);
-	if (SIZE_MAX > UINT32_MAX) {
+	if constexpr (SIZE_MAX > UINT32_MAX) {
 		const pg_header_cache_span excessive = {
 			(const void *)1, (size_t)UINT32_MAX + 1
 		};

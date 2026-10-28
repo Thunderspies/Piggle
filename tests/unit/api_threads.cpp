@@ -71,7 +71,7 @@ static int traverse(struct work *work)
 		pg_file_info info;
 		pg_buffer allocated = {};
 		char bytes[8];
-		size_t size;
+		size_t size = 0;
 		pg_status status;
 
 		PG_STATUS(
@@ -164,7 +164,7 @@ static int traverse(struct work *work)
 	if (work->file) {
 		pg_file_info info;
 		char bytes[8];
-		size_t size;
+		size_t size = 0;
 
 		PG_STATUS(pg_file_inspect(work->file, &info, &error),
 			PG_OK);
