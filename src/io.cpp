@@ -75,6 +75,14 @@ static void pg_reader_verify_stored(pg_reader *reader,
 		v->stream.next_out = output;
 		v->stream.avail_out = sizeof(output);
 		int result = zng_inflate(&v->stream, Z_NO_FLUSH);
+
+		if (result == Z_MEM_ERROR) {
+			zng_inflateEnd(&v->stream);
+			free(v);
+			reader->verifier = NULL;
+			reader->sequential = 0;
+			return;
+		}
 		size_t produced = sizeof(output) - v->stream.avail_out;
 
 		if (produced > reader->file_info.logical_size - v->decoded) {
@@ -91,8 +99,7 @@ static void pg_reader_verify_stored(pg_reader *reader,
 			return;
 		}
 		if (result != Z_OK && result != Z_BUF_ERROR) {
-			reader->verification_status = result == Z_MEM_ERROR
-				? PG_NOMEM : PG_CORRUPT;
+			reader->verification_status = PG_CORRUPT;
 			return;
 		}
 		if (before == v->stream.avail_in && !produced) {
