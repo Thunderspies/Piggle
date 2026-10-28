@@ -161,6 +161,56 @@ TEST_F(ApiMetadata, api_metadata_loose)
 	ASSERT_EQ(0, loose_case());
 }
 
+TEST_F(ApiMetadata, ReusedSlotRejectsOldCopyAndPreservesOtherReaders)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_source *source = NULL;
+	pg_file *old = NULL, *keep = NULL, *current = NULL;
+	pg_reader *reader = NULL, *rejected = NULL;
+	pg_source_options options = {PG_HOGG10, PG_WRITE, 0};
+
+	ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_create(context, "reuse.hogg",
+		PG_HOGG10, 0, &builder, NULL));
+	for (const char *name : {"old", "keep"})
+		ASSERT_EQ(PG_OK, pg_archive_builder_write_all(builder, name,
+			"safe", 4, NULL, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_finish(builder, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_close(&builder, NULL));
+	ASSERT_EQ(PG_OK, pg_source_open(context, "reuse.hogg", &options,
+		&source, NULL));
+	ASSERT_EQ(PG_OK, pg_source_find(source, "old", &old, NULL));
+	ASSERT_EQ(PG_OK, pg_source_find(source, "keep", &keep, NULL));
+	ASSERT_EQ(PG_OK, pg_reader_open(keep, PG_READ_LOGICAL_PAYLOAD,
+		&reader, NULL));
+	pg_file_info before = {}, after = {};
+
+	ASSERT_EQ(PG_OK, pg_file_inspect(old, &before, NULL));
+	ASSERT_EQ(PG_OK, pg_file_delete(old, NULL));
+	ASSERT_EQ(PG_OK, pg_source_write_all(source, "new", "next", 4,
+		NULL, NULL));
+	ASSERT_EQ(PG_OK, pg_source_find(source, "new", &current, NULL));
+	ASSERT_EQ(PG_OK, pg_file_inspect(current, &after, NULL));
+	EXPECT_EQ(before.archive_record, after.archive_record);
+	EXPECT_NE(before.copy_id, after.copy_id);
+	ASSERT_EQ(PG_STALE, pg_reader_open(old, PG_READ_LOGICAL_PAYLOAD,
+		&rejected, NULL));
+	ASSERT_EQ(PG_OK, pg_source_rescan(source, NULL));
+	char bytes[4];
+	size_t count = 0;
+
+	ASSERT_EQ(PG_OK, pg_reader_read(reader, bytes, sizeof(bytes),
+		&count, NULL));
+	EXPECT_EQ(4u, count);
+	EXPECT_EQ(0, memcmp(bytes, "safe", 4));
+	ASSERT_EQ(PG_OK, pg_reader_close(&reader, NULL));
+	for (pg_file **file : {&old, &keep, &current})
+		ASSERT_EQ(PG_OK, pg_file_close(file, NULL));
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+}
+
 TEST_F(ApiMetadata, CapturedHeadersSurviveReplacementAndRescan)
 {
 	for (uint32_t format : {PG_PIGG2, PG_HOGG10}) {

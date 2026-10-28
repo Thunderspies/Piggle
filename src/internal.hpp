@@ -235,6 +235,8 @@ struct pg_source {
 	char *native_path;
 	char *staging_directory;
 	pg_source_record *records;
+	pg_source_record **slot_index;
+	size_t slot_capacity;
 	pg_source_record **record_index;
 	size_t record_count;
 	size_t record_capacity;
@@ -269,19 +271,62 @@ struct pg_source {
 static inline pg_source_record *pg_source_copy_record(pg_source *source,
 	uint64_t slot, pg_id copy_id)
 {
-	if (source->format == PG_HOGG10 && source->hogg_cache) {
-		pg_hogg_cache *cache = source->hogg_cache;
-		pg_source_record *record = slot < cache->file_count ?
-			cache->records[slot] : NULL;
+	pg_source_record *record = slot < source->slot_capacity
+		? source->slot_index[slot] : NULL;
 
-		return record && record->info.copy_id == copy_id
-			? record : NULL;
+	return record && record->info.copy_id == copy_id ? record : NULL;
+}
+
+/* Prepare physical lookup before publishing an archive inventory. */
+static inline pg_status pg_source_slots_reserve(pg_source *source,
+		size_t capacity)
+{
+	if (capacity <= source->slot_capacity)
+		return PG_OK;
+	if (capacity > SIZE_MAX / sizeof(*source->slot_index))
+		return PG_LIMIT;
+	pg_source_record **items = (pg_source_record **)realloc(
+		source->slot_index, capacity * sizeof(*items));
+
+	if (!items)
+		return PG_NOMEM;
+	memset(items + source->slot_capacity, 0,
+		(capacity - source->slot_capacity) * sizeof(*items));
+	source->slot_index = items;
+	source->slot_capacity = capacity;
+	return PG_OK;
+}
+
+static inline pg_status pg_source_slots_prepare(pg_source *source)
+{
+	size_t capacity = 0;
+
+	if (source->format == PG_LOOSE)
+		return PG_OK;
+	for (pg_source_record *r = source->records; r; r = r->next) {
+		if (r->info.archive_record >= SIZE_MAX)
+			return PG_LIMIT;
+		size_t required = (size_t)r->info.archive_record + 1;
+
+		if (capacity < required)
+			capacity = required;
 	}
-	for (pg_source_record *record = source->records; record;
-		record = record->next)
-		if (record->info.copy_id == copy_id)
-			return record;
-	return NULL;
+	pg_status status = pg_source_slots_reserve(source, capacity);
+
+	if (status != PG_OK)
+		return status;
+	for (pg_source_record *r = source->records; r; r = r->next)
+		source->slot_index[r->info.archive_record] = r;
+	return PG_OK;
+}
+
+static inline void pg_source_slots_take(pg_source *source, pg_source *probe)
+{
+	free(source->slot_index);
+	source->slot_index = probe->slot_index;
+	source->slot_capacity = probe->slot_capacity;
+	probe->slot_index = NULL;
+	probe->slot_capacity = 0;
 }
 
 static inline void pg_source_index_clear(pg_source *source)
@@ -309,6 +354,8 @@ pg_status pg_native_target_lease(const char *path, int exists, int *out,
 		int *native_code);
 
 struct pg_tree_source_state {
+	pg_source_record **slot_index;
+	size_t slot_capacity;
 	pg_source_record *records;
 	const char *prefix;
 	int scoped;
