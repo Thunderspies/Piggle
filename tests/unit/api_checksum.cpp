@@ -196,7 +196,8 @@ TEST_F(ApiChecksum, SequentialChunksVerifyEveryCheckedRepresentation)
 			ASSERT_EQ(0, clear_file("sequential"));
 			ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
 			ASSERT_EQ(PG_OK, pg_archive_builder_create_options(
-				context, "sequential", &config, &builder, NULL));
+				context, "sequential", &config, &builder,
+				NULL));
 			std::vector<unsigned char> data(131077);
 
 			for (size_t i = 0; i < data.size(); i++)
@@ -206,11 +207,13 @@ TEST_F(ApiChecksum, SequentialChunksVerifyEveryCheckedRepresentation)
 					? 0 : data.size();
 
 				ASSERT_EQ(PG_OK, pg_archive_builder_write_all(
-					builder, name, data.data(), size, &entry,
-					NULL));
+					builder, name, data.data(), size,
+					&entry, NULL));
 			}
-			ASSERT_EQ(PG_OK, pg_archive_builder_finish(builder, NULL));
-			ASSERT_EQ(PG_OK, pg_archive_builder_close(&builder, NULL));
+			ASSERT_EQ(PG_OK,
+				pg_archive_builder_finish(builder, NULL));
+			ASSERT_EQ(PG_OK,
+				pg_archive_builder_close(&builder, NULL));
 			ASSERT_EQ(PG_OK, pg_source_open(context, "sequential",
 				&open, &source, NULL));
 			for (const char *name : {"empty", "data"}) {
@@ -286,6 +289,96 @@ TEST_F(ApiChecksum, StoredTransferSkipsPayloadValidation)
 	ASSERT_EQ(pg_reader_close(&reader, &error), PG_OK);
 	ASSERT_EQ(pg_source_close(&source, &error), PG_OK);
 	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
+}
+
+TEST_F(ApiChecksum, CheckedStreamsRejectTrailersLengthsAndWrongDigests)
+{
+	pg_archive_options configs[] = {
+		{PG_PIGG2, 0, PG_CHECKSUM_LOGICAL},
+		{PG_HOGG10, 0, PG_CHECKSUM_LOGICAL},
+		{PG_HOGG10, 0, PG_CHECKSUM_STORED},
+	};
+
+	for (const auto &config : configs) {
+		for (int fault = 0; fault < 4; fault++) {
+			pg_context *context = NULL;
+			pg_archive_builder *builder = NULL;
+			pg_source *source = NULL;
+			pg_writer *writer = NULL;
+			std::vector<unsigned char> input(encoded,
+				encoded + sizeof(encoded));
+
+			if (fault == 0)
+				input.push_back(0);
+			if (fault == 1)
+				input.pop_back();
+			pg_stored_write_options options = {};
+
+			options.logical_size = fault == 2 ? 46 : 47;
+			options.stored_size = input.size();
+			options.encoding = PG_ZLIB;
+			options.checksum_domain = config.checksum_domain;
+			options.digest_kind = config.format == PG_PIGG2
+				? PG_DIGEST_MD5 : PG_DIGEST_MD5_32;
+			options.digest[0] = fault == 3 ? 1 : 0;
+			ASSERT_EQ(0, clear_file("bad-stream"));
+			ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+			ASSERT_EQ(PG_OK, pg_archive_builder_create_options(
+				context, "bad-stream", &config, &builder,
+				NULL));
+			ASSERT_EQ(PG_OK, pg_writer_open_archive_builder_stored(
+				builder, "file", &options, &writer, NULL));
+			size_t count = 0;
+
+			ASSERT_EQ(PG_OK, pg_writer_write(writer, input.data(),
+				input.size(), &count, NULL));
+			ASSERT_EQ(PG_OK, pg_writer_finish(writer, NULL));
+			ASSERT_EQ(PG_OK, pg_writer_close(&writer, NULL));
+			ASSERT_EQ(PG_OK,
+				pg_archive_builder_finish(builder, NULL));
+			ASSERT_EQ(PG_OK,
+				pg_archive_builder_close(&builder, NULL));
+			pg_source_options open = {config.format, PG_READ,
+				config.checksum_domain};
+
+			ASSERT_EQ(PG_OK, pg_source_open(context, "bad-stream",
+				&open, &source, NULL));
+			for (uint32_t mode : {PG_READ_LOGICAL_PAYLOAD,
+					PG_READ_STORED}) {
+				pg_reader *reader = NULL;
+				unsigned char bytes[3];
+
+				ASSERT_EQ(PG_OK, pg_reader_open_source(source,
+					"file", mode, &reader, NULL));
+				ASSERT_EQ(PG_OK, pg_reader_read(reader, bytes,
+					1, &count, NULL));
+				ASSERT_EQ(PG_OK,
+					pg_reader_close(&reader, NULL));
+				ASSERT_EQ(PG_OK, pg_reader_open_source(source,
+					"file", mode, &reader, NULL));
+				pg_status status = PG_OK;
+				size_t total = 0;
+
+				while (status == PG_OK) {
+					status = pg_reader_read(reader, bytes,
+						sizeof(bytes), &count, NULL);
+					total += count;
+				}
+				EXPECT_EQ(fault == 3 ? PG_CHECKSUM : PG_CORRUPT,
+					status);
+				if (mode == PG_READ_STORED) {
+					EXPECT_EQ(input.size(), total);
+				}
+				EXPECT_EQ(PG_INVALID, pg_reader_read(reader,
+					bytes, sizeof(bytes), &count, NULL));
+				EXPECT_EQ(0u, count);
+				ASSERT_EQ(PG_OK,
+					pg_reader_close(&reader, NULL));
+			}
+			ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+			ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+		}
+	}
 }
 
 TEST_F(ApiChecksum, StoredWriterValidatesMetadataAndExactLength)
