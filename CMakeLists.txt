@@ -26,6 +26,8 @@ endif()
 option(BUILD_SHARED_LIBS "Build Piggle as a shared library" OFF)
 option(PIGGLE_BUILD_CLI "Build the piggle archive command"
 	${piggle_top_level})
+option(PIGGLE_INSTALL_DEPENDENCIES
+	"Install the bundled zlib-ng library, headers, and package files" OFF)
 option(BUILD_TESTING "Build Piggle tests" ${piggle_top_level})
 include(CTest)
 option(BUILD_UNIT_TESTS "Build GoogleTest unit tests" ON)

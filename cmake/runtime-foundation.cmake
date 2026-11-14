@@ -44,7 +44,12 @@ function(piggle_configure_runtime target)
 		target_compile_definitions(${target}
 			PRIVATE _FILE_OFFSET_BITS=64)
 	endif()
-	target_link_libraries(${target} PRIVATE zlib-ng::zlib Threads::Threads)
+	target_link_libraries(${target} PRIVATE
+		$<BUILD_INTERFACE:zlib-ng::zlib> Threads::Threads)
+	if(NOT BUILD_SHARED_LIBS)
+		target_link_libraries(${target} PRIVATE
+			$<INSTALL_INTERFACE:zlib-ng::zlib>)
+	endif()
 	if(WIN32)
 		target_link_libraries(${target} PRIVATE ntdll)
 	endif()

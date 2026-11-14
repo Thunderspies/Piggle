@@ -18,3 +18,22 @@ set_tests_properties(runner_regressions PROPERTIES
 	TIMEOUT 300
 	WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+
+get_target_property(package_zlib_binary_dir zlib-ng::zlib BINARY_DIR)
+get_target_property(package_zlib_imported zlib-ng::zlib IMPORTED)
+add_test(NAME package_regressions
+	COMMAND "${CMAKE_COMMAND}"
+		"-DBUILD_DIR=${PROJECT_BINARY_DIR}"
+		"-DCONFIG=$<CONFIG>"
+		"-DSHARED=${BUILD_SHARED_LIBS}"
+		"-DINSTALL_DEPENDENCIES=${PIGGLE_INSTALL_DEPENDENCIES}"
+		"-DZLIB_BINARY_DIR=${package_zlib_binary_dir}"
+		"-DZLIB_IMPORTED=${package_zlib_imported}"
+		"-DPREFIX_PATH=${CMAKE_PREFIX_PATH}"
+		"-DGENERATOR=${CMAKE_GENERATOR}"
+		"-DC_COMPILER=${CMAKE_C_COMPILER}"
+		"-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
+		-P "${CMAKE_CURRENT_SOURCE_DIR}/package.cmake"
+)
+set_tests_properties(package_regressions PROPERTIES
+	LABELS infrastructure TIMEOUT 120)

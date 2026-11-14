@@ -58,6 +58,14 @@
 			}
 		},
 		{
+			"name": "bundled",
+			"displayName": "Install bundled runtime dependencies",
+			"inherits": "no-tests",
+			"cacheVariables": {
+				"PIGGLE_INSTALL_DEPENDENCIES": true
+			}
+		},
+		{
 			"name": "release",
 			"displayName": "Release unit and acceptance tests",
 			"inherits": "acceptance",
@@ -85,6 +93,11 @@
 		}
 	],
 	"buildPresets": [
+		{
+			"name": "bundled",
+			"configurePreset": "bundled",
+			"configuration": "Debug"
+		},
 		{
 			"name": "default",
 			"configurePreset": "default",
@@ -127,6 +140,15 @@
 		}
 	],
 	"testPresets": [
+		{
+			"name": "bundled",
+			"inherits": "test-base",
+			"configurePreset": "bundled",
+			"configuration": "Debug",
+			"execution": {
+				"noTestsAction": "ignore"
+			}
+		},
 		{
 			"name": "test-base",
 			"hidden": true,

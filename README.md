@@ -12,8 +12,9 @@ procedural C++17 interface.
 ## Quickstart
 
 Piggle requires CMake 3.24 or newer, C11 and C++17 compilers, and a build tool
-supported by CMake. CPM fetches the compression dependency during the first
-configure.
+supported by CMake. Piggle prefers an installed zlib-ng 2.3.3 or compatible
+newer version in native API mode. If none is found, CPM fetches the pinned
+compression dependency during the first configure.
 
 From the repository root, configure and build Piggle:
 
@@ -52,6 +53,81 @@ This excerpt shows the ownership sequence only. Applications should check every
 returned `pg_status`, preserve the primary diagnostic while cleaning up, and use
 `pg_source_read_all_alloc` with an explicit size limit when the content size is
 unknown.
+
+## Install the CLI and library
+
+From the repository root, build and install both the `piggle` command and the
+library without test dependencies:
+
+```sh
+cmake --preset no-tests
+cmake --build --preset no-tests --parallel
+cmake --install build/no-tests --config Debug
+```
+
+The shared presets install to `$HOME/.local` by default. The command goes in
+`bin`, public headers in `include/piggle`, and the library and CMake package
+files under the platform's library directory (usually `lib` or `lib64`).
+Dependency files are not installed by default. The static library requires
+a separate zlib-ng installation when linking applications. Put its prefix
+on `CMAKE_PREFIX_PATH` when configuring Piggle and those applications.
+The CLI links fetched zlib-ng statically and needs no separate zlib-ng
+installation to run.
+
+To explicitly install the fetched zlib-ng library, headers, and CMake package
+alongside Piggle instead, use the `bundled` preset:
+
+```sh
+cmake --preset bundled
+cmake --build --preset bundled --parallel
+cmake --install build/bundled --config Debug
+```
+
+This preset enables `PIGGLE_INSTALL_DEPENDENCIES`, which defaults to `OFF`.
+It installs zlib-ng as a separate package; it does not merge it into the
+Piggle static library. Use a dedicated prefix to keep the bundle separate
+from other installations. Builds using an existing shared zlib-ng library
+require that library to be available at runtime.
+
+Add `$HOME/.local/bin` to your `PATH`, then check the installed command:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+piggle --version
+piggle --help
+```
+
+To install elsewhere, pass `--prefix /path/to/prefix` to `cmake --install`.
+For build-time install settings, or a library-only build with
+`PIGGLE_BUILD_CLI` set to `OFF`, use an ignored `CMakeUserPresets.json` as
+described in the [testing guide](docs/testing.md#local-customization).
+
+The commands above install a static Debug library. For an optimized build,
+use the `release` configure and build presets, then install with
+`cmake --install build/release --config Release`. For a shared library, use
+the `shared` presets and `cmake --install build/shared --config Debug`.
+Both presets require the acceptance-test prerequisites described below.
+
+To use the installed library in another CMake project:
+
+```cmake
+find_package(piggle CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE piggle::piggle)
+```
+
+Configure that project with the installation prefix on CMake's search path:
+
+```sh
+cmake -S /path/to/my_app -B /path/to/my_app/build \
+  -DCMAKE_PREFIX_PATH="$HOME/.local"
+```
+
+Replace `$HOME/.local` if you installed elsewhere. If zlib-ng is in a separate
+prefix, use `-DCMAKE_PREFIX_PATH="$HOME/.local;/path/to/zlib-ng"` instead.
+Shared Piggle packages built with fetched, static zlib-ng do not require
+zlib-ng's CMake package for consumers. The imported target supplies
+the public include paths and required link dependencies; include
+`<piggle/piggle.h>` from C or `<piggle/piggle.hpp>` from C++.
 
 ## Build and test
 
