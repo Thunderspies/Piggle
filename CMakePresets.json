@@ -74,6 +74,23 @@
 			}
 		},
 		{
+			"name": "windows-portable",
+			"displayName": "Portable Windows CLI",
+			"inherits": "no-tests",
+			"condition": {
+				"type": "equals",
+				"lhs": "${hostSystemName}",
+				"rhs": "Windows"
+			},
+			"cacheVariables": {
+				"CMAKE_BUILD_TYPE": "Release",
+				"CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded",
+				"BUILD_SHARED_LIBS": false,
+				"PIGGLE_BUILD_CLI": true,
+				"CMAKE_DISABLE_FIND_PACKAGE_zlib-ng": true
+			}
+		},
+		{
 			"name": "shared",
 			"displayName": "Shared library unit and acceptance tests",
 			"inherits": "acceptance",
@@ -126,6 +143,11 @@
 		{
 			"name": "release",
 			"configurePreset": "release",
+			"configuration": "Release"
+		},
+		{
+			"name": "windows-portable",
+			"configurePreset": "windows-portable",
 			"configuration": "Release"
 		},
 		{
@@ -199,6 +221,12 @@
 			"name": "release",
 			"inherits": "test-base",
 			"configurePreset": "release",
+			"configuration": "Release"
+		},
+		{
+			"name": "windows-portable",
+			"inherits": "no-tests",
+			"configurePreset": "windows-portable",
 			"configuration": "Release"
 		},
 		{
