@@ -1,0 +1,165 @@
+name: Release draft
+
+on:
+  push:
+    tags:
+      - '**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Portable Windows x64 CLI
+    runs-on: windows-2022
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+
+    steps:
+      - name: Preserve LF line endings
+        run: git config --global core.autocrlf false
+
+      - name: Check out tagged sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create or reuse release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $release = gh release view $env:RELEASE_TAG --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($release | ConvertFrom-Json).isDraft) {
+              throw "Release $env:RELEASE_TAG is already published."
+            }
+          } else {
+            gh release create $env:RELEASE_TAG --draft --verify-tag `
+              --title $env:RELEASE_TAG --notes ''
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not create the release draft.'
+            }
+          }
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      - name: Generate CI presets
+        run: |
+          @'
+          {
+            "version": 5,
+            "configurePresets": [{
+              "name": "release-ci",
+              "inherits": "windows-portable",
+              "generator": "Ninja",
+              "binaryDir": "${sourceDir}/build/release-ci",
+              "cacheVariables": {
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl",
+                "CPM_SOURCE_CACHE": "${sourceDir}/build/cpm-cache"
+              }
+            }],
+            "buildPresets": [{
+              "name": "release-ci",
+              "inherits": "windows-portable",
+              "configurePreset": "release-ci"
+            }],
+            "testPresets": [{
+              "name": "release-ci",
+              "inherits": "windows-portable",
+              "configurePreset": "release-ci"
+            }]
+          }
+          '@ | Set-Content CMakeUserPresets.json
+
+      - name: Configure portable CLI
+        run: cmake --preset release-ci
+
+      - name: Build portable CLI
+        run: cmake --build --preset release-ci --target piggle_cli --parallel 2
+
+      - name: Check executable dependencies
+        run: |
+          $dependencies = dumpbin /DEPENDENTS build/release-ci/cli/piggle.exe
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not inspect executable dependencies.'
+          }
+          $dependencies
+          $dlls = @($dependencies | ForEach-Object {
+            if ($_ -match '^\s+(\S+\.dll)\s*$') { $Matches[1] }
+          })
+          if ($dlls.Count -eq 0) {
+            throw 'No Windows DLL imports found in dumpbin output.'
+          }
+          # A portable MSVC build imports only Windows system libraries.
+          $unexpected = @($dlls | Where-Object {
+            $_ -notmatch '^(KERNEL32|NTDLL|ADVAPI32|USER32|SHELL32|OLE32|WS2_32)\.dll$'
+          })
+          if ($unexpected.Count -ne 0) {
+            throw "Unexpected DLL dependencies: $($unexpected -join ', ')"
+          }
+
+      - name: Smoke test standalone executable
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'piggle-portable'
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          $exe = Join-Path $stage 'piggle-windows-x64.exe'
+          Copy-Item build/release-ci/cli/piggle.exe $exe
+          Push-Location $stage
+          try {
+            & $exe --version
+            if ($LASTEXITCODE -ne 0) { throw 'Version check failed.' }
+            & $exe --help
+            if ($LASTEXITCODE -ne 0) { throw 'Help check failed.' }
+            # Exercise compression as well as binary byte preservation.
+            $inputFile = Join-Path $stage 'input.bin'
+            [byte[]] $bytes = 0..255 * 1024
+            [IO.File]::WriteAllBytes($inputFile, $bytes)
+            foreach ($format in @('pigg2', 'hogg10')) {
+              $archive = Join-Path $stage "$format.archive"
+              $outputDir = Join-Path $stage $format
+              New-Item -ItemType Directory -Path $outputDir | Out-Null
+              & $exe create $format $archive 'payload.bin' $inputFile
+              if ($LASTEXITCODE -ne 0) { throw "$format create failed." }
+              & $exe verify $archive
+              if ($LASTEXITCODE -ne 0) { throw "$format verify failed." }
+              & $exe extract $archive $outputDir
+              if ($LASTEXITCODE -ne 0) { throw "$format extract failed." }
+              $outputFile = Join-Path $outputDir 'payload.bin'
+              if ((Get-FileHash $inputFile).Hash -ne
+                  (Get-FileHash $outputFile).Hash) {
+                throw "$format extracted bytes differ from the input."
+              }
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Attach executable to release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = gh release view $env:RELEASE_TAG --json isDraft
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the release.' }
+          if (-not ($release | ConvertFrom-Json).isDraft) {
+            throw "Release $env:RELEASE_TAG is already published."
+          }
+          $exe = Join-Path $env:RUNNER_TEMP `
+            'piggle-portable/piggle-windows-x64.exe'
+          gh release upload $env:RELEASE_TAG $exe --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not upload the executable.' }
