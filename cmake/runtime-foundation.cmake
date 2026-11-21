@@ -40,7 +40,7 @@ function(piggle_configure_runtime target)
 			VISIBILITY_INLINES_HIDDEN YES)
 	endif()
 	target_compile_definitions(${target} PRIVATE PIGGLE_BUILD)
-	if(UNIX)
+	if(UNIX OR MINGW)
 		target_compile_definitions(${target}
 			PRIVATE _FILE_OFFSET_BITS=64)
 	endif()
