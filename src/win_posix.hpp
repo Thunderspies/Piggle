@@ -742,6 +742,10 @@ static inline int pg_win_linkat(int old_parent,
 	return status;
 }
 
+/* Replace the aliases that MinGW defines in large-file mode. */
+#undef fstat
+#undef stat
+
 #define DIR pg_win_dir
 #define dirent pg_win_dirent
 #define readdir pg_win_readdir

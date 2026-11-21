@@ -2,6 +2,9 @@
 #include "../../src/internal.hpp"
 #include <fstream>
 #include <zlib-ng.h>
+#ifdef _WIN32
+#include <winioctl.h>
+#endif
 #ifdef __linux__
 #include <signal.h>
 #include <sys/resource.h>
@@ -71,6 +74,67 @@ TEST_F(ApiBuilder, OrderedHogg)
 TEST_F(ApiBuilder, OrderedPigg)
 {
 	ASSERT_EQ(0, ordered_builder(PG_PIGG2));
+}
+
+TEST_F(ApiBuilder, HoggEntryBeyondTwoGiB)
+{
+	pg_context *context = NULL;
+	pg_archive_builder *builder = NULL;
+	pg_error error;
+	EXPECT_STATUS(pg_context_open(&context, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_create(context, "large.hogg",
+			PG_HOGG10, 0, &builder, &error),
+		PG_OK);
+
+	/* Set up the writer's starting offset with a sparse file. */
+	constexpr uint64_t offset = (UINT64_C(1) << 31) + 4096;
+#ifdef _WIN32
+	HANDLE handle = (HANDLE)_get_osfhandle(_fileno(builder->staging));
+	DWORD returned;
+	if (!DeviceIoControl(handle, FSCTL_SET_SPARSE, NULL, 0, NULL, 0,
+			&returned, NULL)) {
+		DWORD code = GetLastError();
+
+		if (code == ERROR_INVALID_FUNCTION ||
+			code == ERROR_NOT_SUPPORTED)
+			GTEST_SKIP() << "Staging filesystem lacks sparse files";
+		FAIL() << "FSCTL_SET_SPARSE failed with Win32 error " << code;
+	}
+	FILE_END_OF_FILE_INFO end = {};
+	end.EndOfFile.QuadPart = (int64_t)offset;
+	ASSERT_TRUE(SetFileInformationByHandle(handle, FileEndOfFileInfo,
+			&end, (DWORD)sizeof(end)));
+#else
+	std::error_code resize_error;
+	std::filesystem::resize_file(builder->staging_path, offset,
+		resize_error);
+	ASSERT_FALSE(resize_error) << resize_error.message();
+#endif
+
+	pg_entry_options options = {};
+	options.compression = PG_COMPRESS_NEVER;
+	char marker = 'x';
+	EXPECT_STATUS(pg_archive_builder_write_all(builder, "marker", &marker,
+			sizeof(marker), &options, &error),
+		PG_OK);
+	ASSERT_NE(nullptr, builder->entries);
+	EXPECT_EQ(offset, builder->entries->stage_offset);
+	EXPECT_STATUS(pg_archive_builder_finish(builder, &error), PG_OK);
+	EXPECT_STATUS(pg_archive_builder_close(&builder, &error), PG_OK);
+
+	pg_source *source = NULL;
+	EXPECT_STATUS(pg_source_open(context, "large.hogg", NULL, &source,
+			&error),
+		PG_OK);
+	char read = 0;
+	size_t count = 0;
+	EXPECT_STATUS(pg_source_read_all(source, "marker", &read, sizeof(read),
+			&count, &error),
+		PG_OK);
+	EXPECT_EQ(sizeof(marker), count);
+	EXPECT_EQ(marker, read);
+	EXPECT_STATUS(pg_source_close(&source, &error), PG_OK);
+	EXPECT_STATUS(pg_context_close(&context, &error), PG_OK);
 }
 
 #ifdef PIGGLE_TEST_ALLOCATION_PATH
