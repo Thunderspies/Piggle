@@ -418,6 +418,226 @@ TEST_F(ApiChecksum, StoredWriterValidatesMetadataAndExactLength)
 	ASSERT_EQ(pg_context_close(&context, &error), PG_OK);
 }
 
+static void make_stored_source(pg_context *context, uint32_t domain)
+{
+	pg_archive_builder *builder = NULL;
+	pg_archive_options options = {PG_HOGG10, 0, domain};
+
+	ASSERT_EQ(PG_OK, pg_archive_builder_create_options(context, "base",
+		&options, &builder, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_write_all(builder, "A", "old", 3,
+		NULL, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_finish(builder, NULL));
+	ASSERT_EQ(PG_OK, pg_archive_builder_close(&builder, NULL));
+}
+
+TEST_F(ApiChecksum, StoredSourceRejectsMetadataAndUnfinishedInput)
+{
+	pg_context *context = NULL;
+	pg_source *source = NULL;
+	pg_writer *writer = NULL;
+	pg_error error;
+	pg_stored_write_options options = {};
+
+	options.logical_size = options.stored_size = 3;
+	options.digest_kind = PG_DIGEST_MD5_32;
+	ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+	ASSERT_NO_FATAL_FAILURE(
+		make_stored_source(context, PG_CHECKSUM_LOGICAL));
+	const auto archive_size = std::filesystem::file_size("base");
+
+	ASSERT_EQ(PG_OK, pg_source_open(context, "base", NULL, &source, NULL));
+	EXPECT_EQ(PG_READ_ONLY, pg_writer_open_source_stored(source, "a",
+		&options, &writer, &error));
+	EXPECT_EQ(PG_READ_ONLY, error.status);
+	EXPECT_EQ(nullptr, writer);
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	ASSERT_EQ(0, directory("loose"));
+	pg_source_options loose = {PG_LOOSE, PG_WRITE, 0};
+
+	ASSERT_EQ(PG_OK, pg_source_open(context, "loose", &loose, &source,
+		NULL));
+	EXPECT_EQ(PG_UNSUPPORTED, pg_writer_open_source_stored(source, "a",
+		&options, &writer, NULL));
+	EXPECT_EQ(nullptr, writer);
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	pg_source_options open = {PG_HOGG10, PG_WRITE, PG_CHECKSUM_LOGICAL};
+
+	ASSERT_EQ(PG_OK, pg_source_open(context, "base", &open, &source, NULL));
+	auto reject = [&](pg_stored_write_options rejected, pg_status status) {
+		EXPECT_EQ(status, pg_writer_open_source_stored(source, "a",
+			&rejected, &writer, &error));
+		EXPECT_EQ(status, error.status);
+		EXPECT_EQ(nullptr, writer);
+	};
+	pg_stored_write_options rejected = options;
+
+	rejected.stored_size = 2;
+	reject(rejected, PG_INVALID);
+	rejected = options;
+	rejected.encoding = PG_ZLIB;
+	rejected.logical_size = 0;
+	reject(rejected, PG_INVALID);
+	rejected = options;
+	rejected.digest[4] = 1;
+	reject(rejected, PG_INVALID);
+	rejected = options;
+	rejected.checksum_domain = PG_CHECKSUM_STORED;
+	reject(rejected, PG_INVALID);
+	rejected = options;
+	rejected.cached_header_size = 1;
+	reject(rejected, PG_INVALID);
+	rejected = options;
+	rejected.original_name = "A";
+	reject(rejected, PG_INVALID);
+	rejected = options;
+	rejected.logical_size = rejected.stored_size = UINT32_MAX;
+	reject(rejected, PG_LIMIT);
+	rejected = options;
+	rejected.mtime = (int64_t)INT32_MAX + 1;
+	reject(rejected, PG_LIMIT);
+	EXPECT_EQ(PG_CONFLICT, pg_writer_open_source_stored(source, "a/child",
+		&options, &writer, NULL));
+	EXPECT_EQ(nullptr, writer);
+
+	ASSERT_EQ(PG_OK, pg_writer_open_source_stored(source, "a", &options,
+		&writer, NULL));
+	pg_writer *other = NULL;
+
+	EXPECT_EQ(PG_BUSY, pg_writer_open_source_stored(source, "b", &options,
+		&other, NULL));
+	EXPECT_EQ(nullptr, other);
+	size_t count = 0;
+
+	ASSERT_EQ(PG_OK, pg_writer_write(writer, "ab", 2, &count, NULL));
+	EXPECT_EQ(2u, count);
+	EXPECT_EQ(PG_INVALID, pg_writer_finish(writer, &error));
+	EXPECT_EQ(PG_INVALID, error.status);
+	EXPECT_EQ(PG_INVALID, pg_writer_write(writer, "c", 1, &count, NULL));
+	EXPECT_EQ(0u, count);
+	ASSERT_EQ(PG_OK, pg_writer_close(&writer, NULL));
+
+	ASSERT_EQ(PG_OK, pg_writer_open_source_stored(source, "a", &options,
+		&writer, NULL));
+	EXPECT_EQ(PG_INVALID, pg_writer_write(writer, "abcd", 4, &count, NULL));
+	EXPECT_EQ(0u, count);
+	ASSERT_EQ(PG_OK, pg_writer_write(writer, "abc", 3, &count, NULL));
+	EXPECT_EQ(3u, count);
+	ASSERT_EQ(PG_OK, pg_writer_close(&writer, NULL));
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	EXPECT_EQ(archive_size, std::filesystem::file_size("base"));
+
+	ASSERT_EQ(PG_OK, pg_source_open(context, "base", NULL, &source, NULL));
+	char old[3];
+
+	ASSERT_EQ(PG_OK, pg_source_read_all(source, "a", old, sizeof(old),
+		&count, NULL));
+	EXPECT_EQ(3u, count);
+	EXPECT_EQ(0, memcmp(old, "old", 3));
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+}
+
+TEST_F(ApiChecksum, StoredSourcePreservesUnvalidatedPayloadAndDigest)
+{
+	pg_context *context = NULL;
+	pg_source *source = NULL;
+	pg_writer *writer = NULL;
+	pg_stored_write_options options = {};
+
+	options.logical_size = 47;
+	options.stored_size = 3;
+	options.encoding = PG_ZLIB;
+	options.digest_kind = PG_DIGEST_MD5_32;
+	options.checksum_domain = PG_CHECKSUM_STORED;
+	memcpy(options.digest, stored_digest, sizeof(stored_digest));
+	pg_source_options open = {PG_HOGG10, PG_WRITE, PG_CHECKSUM_STORED};
+
+	ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+	ASSERT_NO_FATAL_FAILURE(
+		make_stored_source(context, PG_CHECKSUM_STORED));
+	ASSERT_EQ(PG_OK, pg_source_open(context, "base", &open, &source, NULL));
+	ASSERT_EQ(PG_OK, pg_writer_open_source_stored(source, "a", &options,
+		&writer, NULL));
+	size_t count = 0;
+
+	ASSERT_EQ(PG_OK, pg_writer_write(writer, "bad", 3, &count, NULL));
+	EXPECT_EQ(3u, count);
+	ASSERT_EQ(PG_OK, pg_writer_finish(writer, NULL));
+	ASSERT_EQ(PG_OK, pg_writer_close(&writer, NULL));
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+
+	open.access = PG_READ;
+	ASSERT_EQ(PG_OK, pg_source_open(context, "base", &open, &source, NULL));
+	pg_file *file = NULL;
+	pg_file_info info;
+
+	ASSERT_EQ(PG_OK, pg_source_find(source, "a", &file, NULL));
+	ASSERT_EQ(PG_OK, pg_file_inspect(file, &info, NULL));
+	EXPECT_STREQ("A", info.original_name);
+	EXPECT_EQ(47u, info.logical_size);
+	EXPECT_EQ(3u, info.stored_size);
+	EXPECT_EQ(PG_ZLIB, info.encoding);
+	EXPECT_EQ(PG_CHECKSUM_STORED, info.checksum_domain);
+	EXPECT_EQ(PG_DIGEST_MD5_32, info.digest_kind);
+	EXPECT_EQ(0, memcmp(info.digest, stored_digest, sizeof(stored_digest)));
+	EXPECT_EQ(0u, info.cached_header_size);
+	pg_reader *reader = NULL;
+	char stored[3];
+
+	ASSERT_EQ(PG_OK, pg_reader_open(file, PG_READ_STORED_UNCHECKED,
+		&reader, NULL));
+	ASSERT_EQ(PG_OK, pg_reader_read(reader, stored, sizeof(stored), &count,
+		NULL));
+	EXPECT_EQ(3u, count);
+	EXPECT_EQ(0, memcmp(stored, "bad", 3));
+	EXPECT_EQ(PG_END, pg_reader_read(reader, stored, sizeof(stored), &count,
+		NULL));
+	ASSERT_EQ(PG_OK, pg_reader_close(&reader, NULL));
+	EXPECT_EQ(PG_CORRUPT, pg_file_verify(file, NULL));
+	ASSERT_EQ(PG_OK, pg_file_close(&file, NULL));
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+}
+
+TEST_F(ApiChecksum, StoredSourceRejectsStaleTarget)
+{
+	pg_context *context = NULL;
+	pg_source *source = NULL;
+	pg_writer *writer = NULL;
+	pg_source_options open = {PG_HOGG10, PG_WRITE, PG_CHECKSUM_LOGICAL};
+	pg_stored_write_options options = {};
+
+	options.logical_size = options.stored_size = 3;
+	options.digest_kind = PG_DIGEST_MD5_32;
+	ASSERT_EQ(PG_OK, pg_context_open(&context, NULL));
+	ASSERT_NO_FATAL_FAILURE(
+		make_stored_source(context, PG_CHECKSUM_LOGICAL));
+	ASSERT_EQ(PG_OK, pg_source_open(context, "base", &open, &source, NULL));
+	ASSERT_EQ(PG_OK, pg_writer_open_source_stored(source, "a", &options,
+		&writer, NULL));
+	size_t count = 0;
+
+	ASSERT_EQ(PG_OK, pg_writer_write(writer, "new", 3, &count, NULL));
+	const auto external_size = std::filesystem::file_size("base") + 1;
+
+	std::filesystem::resize_file("base", external_size);
+	EXPECT_EQ(PG_STALE, pg_writer_finish(writer, NULL));
+	ASSERT_EQ(PG_OK, pg_writer_close(&writer, NULL));
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	EXPECT_EQ(external_size, std::filesystem::file_size("base"));
+
+	ASSERT_EQ(PG_OK, pg_source_open(context, "base", NULL, &source, NULL));
+	char old[3];
+
+	ASSERT_EQ(PG_OK, pg_source_read_all(source, "a", old, sizeof(old),
+		&count, NULL));
+	EXPECT_EQ(3u, count);
+	EXPECT_EQ(0, memcmp(old, "old", 3));
+	ASSERT_EQ(PG_OK, pg_source_close(&source, NULL));
+	ASSERT_EQ(PG_OK, pg_context_close(&context, NULL));
+}
+
 TEST(PiggleDigest, Md5BoundariesAndFragmentedInputMatchKnownDigests)
 {
 	struct Example {

@@ -18,6 +18,7 @@ using ::pg_reader_tell;
 using ::pg_reader_read;
 using ::pg_reader_close;
 using ::pg_writer_open_source;
+using ::pg_writer_open_source_stored;
 using ::pg_writer_open_file;
 using ::pg_writer_open_archive_builder;
 using ::pg_writer_open_archive_builder_stored;

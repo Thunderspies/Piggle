@@ -908,7 +908,31 @@ supply the logical length and checksum alongside already encoded bytes. The
 caller owns payload acceptance. Ordinary readers and writers remain checked;
 archive metadata and the internal DataList retain their checked behavior.
 
+`pg_writer_open_source_stored` uses the same stored options to add or replace
+a named entry in an existing writable HOGG v10 source. The digest domain must
+match the source profile. HOGG records the first four bytes of the supplied
+MD5 digest. Piggle checks the declared lengths, digest metadata, source and
+name rules, and format limits. The caller validates the stored payload, its
+logical length, and the digest before opening the writer. The stored length
+must be less than `UINT32_MAX`, which HOGG reserves for unused records.
+
+The named-source lease, target checks, and recovery rules also apply to
+stored writes. Finish publishes the entry through the HOGG journals. A
+chunk exceeding the remaining declared length is rejected in full and can
+be retried with a valid length. A short finish makes the writer close-only.
+Closing without finish discards staged input and preserves the selected entry.
+
+Cached headers are opaque. A zero-length span results in an entry with no
+cached header. The standard empty DataList journal fits a 3,075-byte header
+for replacement. An addition also needs room for a name action, including
+the terminating NUL. When the actions exceed the available journal space,
+Piggle folds them into a replacement base DataList. The header length must
+fit a 32-bit field, and the complete replacement DataList must fit the HOGG
+size fields and available memory. See [large cached headers](#large-cached-headers)
+and [issue #19][hogg-large-headers].
+
 [minizip-raw]: https://raw.githubusercontent.com/madler/zlib/develop/contrib/minizip/zip.h
+[hogg-large-headers]: https://github.com/Thunderspies/Piggle/issues/19
 
 ## Standalone resource headers and cache containers
 

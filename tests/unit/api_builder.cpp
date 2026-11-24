@@ -386,8 +386,13 @@ TEST_F(ApiBuilder, RetryAfterPartialStagingWriteAcrossVolumes)
 	EXPECT_EQ(0, WEXITSTATUS(status));
 }
 
-TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
+static void interrupted_large_header_fold(bool stored)
 {
+	/* An RFC 1950 stream containing an uncompressed block for "abc". */
+	const unsigned char encoded[] = {0x78, 0x01, 0x01, 0x03, 0x00, 0xfc,
+		0xff, 'a', 'b', 'c', 0x02, 0x4d, 0x01, 0x27};
+	const std::string header(65536, 'H');
+	const char old_header[] = {'P', '\0', 'X'};
 	pg_context *context = NULL;
 	pg_archive_builder *builder = NULL;
 	pg_source *source = NULL;
@@ -397,6 +402,15 @@ TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
 			0, &builder, &error), PG_OK);
 	EXPECT_STATUS(pg_archive_builder_write_all(
 			builder, "keep", "safe", 4, NULL, &error), PG_OK);
+	if (stored) {
+		pg_entry_options entry = {};
+
+		entry.cached_header = old_header;
+		entry.cached_header_size = sizeof(old_header);
+		EXPECT_STATUS(pg_archive_builder_write_all(
+				builder, "new", "old", 3, &entry, &error),
+			PG_OK);
+	}
 	EXPECT_STATUS(pg_archive_builder_finish(builder, &error), PG_OK);
 	EXPECT_STATUS(pg_archive_builder_close(&builder, &error), PG_OK);
 	pg_source_options writable = {PG_HOGG10, PG_WRITE, 0};
@@ -406,6 +420,7 @@ TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
 			NULL, &error), PG_OK);
 	EXPECT_STATUS(pg_source_close(&source, &error), PG_OK);
 	for (int mode = 13; mode <= 15; mode++) {
+		SCOPED_TRACE(mode);
 		std::filesystem::copy_file("base", "fold",
 			std::filesystem::copy_options::overwrite_existing);
 		pid_t pid = fork();
@@ -415,14 +430,39 @@ TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
 			if (pg_source_open(context, "fold", &writable,
 					&child_source, &error) != PG_OK)
 				_exit(2);
-			std::string header(65536, 'H');
-			pg_entry_options entry = {};
-			entry.cached_header = header.data();
-			entry.cached_header_size = header.size();
-			pg_test_journal_fault(mode);
-			pg_source_write_all(child_source, "new", "abc", 3,
-				&entry, &error);
-			_exit(3);
+			if (stored) {
+				pg_stored_write_options options = {};
+				pg_writer *writer = NULL;
+				size_t count;
+
+				options.logical_size = 3;
+				options.stored_size = sizeof(encoded);
+				options.encoding = PG_ZLIB;
+				options.digest_kind = PG_DIGEST_MD5_32;
+				memcpy(options.digest, "\x90\x01\x50\x98", 4);
+				options.cached_header = header.data();
+				options.cached_header_size = header.size();
+				if (pg_writer_open_source_stored(child_source,
+						"new", &options, &writer,
+						&error) != PG_OK)
+					_exit(3);
+				if (pg_writer_write(writer, encoded,
+						sizeof(encoded), &count,
+						&error) != PG_OK ||
+					count != sizeof(encoded))
+					_exit(4);
+				pg_test_journal_fault(mode);
+				pg_writer_finish(writer, &error);
+			} else {
+				pg_entry_options entry = {};
+
+				entry.cached_header = header.data();
+				entry.cached_header_size = header.size();
+				pg_test_journal_fault(mode);
+				pg_source_write_all(child_source, "new", "abc",
+					3, &entry, &error);
+			}
+			_exit(5);
 		}
 		int status;
 		ASSERT_EQ(pid, waitpid(pid, &status, 0));
@@ -441,19 +481,64 @@ TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
 			EXPECT_EQ(0, memcmp(bytes,
 				!strcmp(name, "keep") ? "safe" : "live", 4));
 		}
+		bool published = mode == 15;
 		pg_file *file = NULL;
 		EXPECT_STATUS(pg_source_find(source, "new", &file, &error),
-			mode == 15 ? PG_OK : PG_NOT_FOUND);
+			published || stored ? PG_OK : PG_NOT_FOUND);
 		if (file) {
 			pg_file_info info;
+			const char *expected_header =
+				published ? header.data() : old_header;
+			size_t header_size = published ? header.size()
+				: sizeof(old_header);
+
 			EXPECT_STATUS(
 				pg_file_inspect(file, &info, &error), PG_OK);
-			EXPECT_EQ(65536u, info.cached_header_size);
+			ASSERT_EQ(header_size, info.cached_header_size);
+			ASSERT_NE(nullptr, info.cached_header);
+			EXPECT_EQ(0,
+				memcmp(expected_header, info.cached_header,
+					header_size));
+			if (stored) {
+				pg_reader *reader = NULL;
+				unsigned char bytes[sizeof(encoded)];
+				size_t count;
+
+				EXPECT_EQ(published ? PG_ZLIB : PG_LOGICAL,
+					info.encoding);
+				EXPECT_STATUS(pg_reader_open(file,
+						PG_READ_STORED_UNCHECKED,
+						&reader, &error), PG_OK);
+				EXPECT_STATUS(pg_reader_read(reader, bytes,
+						sizeof(bytes), &count, &error),
+					PG_OK);
+				ASSERT_EQ(published ? sizeof(encoded) : 3u,
+					count);
+				EXPECT_EQ(0, published
+					? memcmp(bytes, encoded, count)
+					: memcmp(bytes, "old", count));
+				EXPECT_STATUS(pg_reader_read(reader, bytes,
+						sizeof(bytes), &count, &error),
+					PG_END);
+				EXPECT_EQ(0u, count);
+				EXPECT_STATUS(pg_reader_close(&reader, &error),
+					PG_OK);
+			}
 			EXPECT_STATUS(pg_file_close(&file, &error), PG_OK);
 		}
 		EXPECT_STATUS(pg_source_close(&source, &error), PG_OK);
 	}
 	EXPECT_STATUS(pg_context_close(&context, &error), PG_OK);
+}
+
+TEST_F(ApiBuilder, InterruptedLargeHeaderFold)
+{
+	interrupted_large_header_fold(false);
+}
+
+TEST_F(ApiBuilder, InterruptedStoredReplacementWithLargeHeader)
+{
+	interrupted_large_header_fold(true);
 }
 
 #endif

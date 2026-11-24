@@ -190,8 +190,9 @@ typedef struct pg_write_options {
 /* Already accepted stored payload and archive metadata. No payload decoding,
  * hashing or encoding. Raw lengths must match; ZLIB lengths must be nonzero.
  * digest_kind must be MD5 or (HOGG only) MD5_32; unused digest bytes zero.
- * checksum_domain must match the builder. Names/header copy at open, as for
- * pg_entry_options. mtime and format limits match checked writes.
+ * checksum_domain must match the destination archive profile. Names/header
+ * copy at open, as for pg_entry_options. mtime and format limits match
+ * checked writes.
  */
 typedef struct pg_stored_write_options {
 	uint64_t logical_size;

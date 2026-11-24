@@ -142,6 +142,23 @@ PG_API pg_status PG_CALL pg_writer_open_source(
 		pg_writer **out,
 		pg_error *error);
 
+/* Add or replace a named entry in a writable HOGG v10 source using
+ * caller-accepted stored bytes. Inherit pg_writer_open_source's name,
+ * ownership, lease, staleness and journal publication rules. Other writable
+ * source formats return UNSUPPORTED. Options and out are required; out is
+ * NULL on failure. Borrowed metadata is copied before return.
+ * Piggle checks metadata and exact stored length. The caller validates
+ * payload encoding, logical length and digest. Cached headers are opaque;
+ * empty means absent. HOGG stores the first four digest bytes. Headers that
+ * exceed journal space use the base DataList within its format limits.
+ */
+PG_API pg_status PG_CALL pg_writer_open_source_stored(
+		pg_source *destination,
+		const char *name,
+		const pg_stored_write_options *options,
+		pg_writer **out,
+		pg_error *error);
+
 /* Open writer for exactly this captured copy, even if later hidden. Name and
  * source come from file; no redundant name/replace arguments. Options
  * required; original_name override is INVALID. No virtual hierarchy check:

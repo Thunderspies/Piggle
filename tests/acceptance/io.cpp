@@ -1392,3 +1392,101 @@ THEN("^a checked stored reader rejects the malformed payload$")
 	w.chunk(w.reader, 8);
 	expect_status(w.status, PG_CORRUPT, w.error);
 }
+
+/* First four MD5 bytes for the logical payload "stored\0payload". */
+static constexpr uint8_t stored_update_digest[] = {0x97, 0xa9, 0x9a, 0x91};
+
+GIVEN("^an existing writable HOGG prepared for (addition|replacement)$")
+{
+	World &w = world();
+	REGEX_PARAM(std::string, operation);
+	WorldFiles files = {{"keep", "unchanged"}};
+
+	if (operation == "replacement")
+		files.emplace_back("target", "old");
+	w.archive("archive", files, PG_HOGG10);
+}
+
+WHEN("^I publish a (raw|zlib) stored payload with a cached header$")
+{
+	World &w = world();
+	REGEX_PARAM(std::string, encoding);
+	pg_stored_write_options options = {};
+
+	w.expected.assign("stored\0payload", 14);
+	w.bytes = w.expected;
+	w.previous.assign(7, 'H');
+	if (encoding == "zlib") {
+		unsigned char encoded[128];
+		size_t size = sizeof(encoded);
+
+		/* Level zero produces a stream larger than the raw input. */
+		ASSERT_EQ(zng_compress2(encoded, &size,
+				reinterpret_cast<const unsigned char *>(
+					w.expected.data()),
+				w.expected.size(), 0), Z_OK);
+		w.bytes.assign(reinterpret_cast<const char *>(encoded), size);
+		w.previous.assign(4096, 'H');
+		options.encoding = PG_ZLIB;
+	}
+	w.previous[1] = '\0';
+	options.logical_size = w.expected.size();
+	options.stored_size = w.bytes.size();
+	options.digest_kind = PG_DIGEST_MD5_32;
+	memcpy(options.digest, stored_update_digest,
+		sizeof(stored_update_digest));
+	options.cached_header = w.previous.data();
+	options.cached_header_size = w.previous.size();
+	ASSERT_TRUE(piggle_test::status_result(pg_writer_open_source_stored(
+		w.source(), "target", &options, &w.writer, &w.error),
+		PG_OK, w.error));
+	w.write(w.bytes);
+	w.finished();
+}
+
+THEN("^the reopened HOGG contains the exact (raw|zlib) payload and header$")
+{
+	World &w = world();
+	REGEX_PARAM(std::string, encoding);
+	pg_file_info info;
+
+	expect_status(pg_source_close(&w.sources.at(w.active), &w.error),
+		PG_OK, w.error);
+	w.open("archive", PG_READ);
+	expect_status(w.status, PG_OK, w.error);
+	w.select("target", false);
+	expect_status(pg_file_inspect(w.file, &info, &w.error), PG_OK, w.error);
+	EXPECT_EQ(info.encoding, encoding == "zlib" ? PG_ZLIB : PG_LOGICAL);
+	EXPECT_EQ(info.logical_size, w.expected.size());
+	EXPECT_EQ(info.stored_size, w.bytes.size());
+	EXPECT_EQ(info.digest_kind, PG_DIGEST_MD5_32);
+	EXPECT_EQ(memcmp(info.digest, stored_update_digest,
+			sizeof(stored_update_digest)), 0);
+	ASSERT_EQ(info.cached_header_size, w.previous.size());
+	ASSERT_NE(info.cached_header, nullptr);
+	EXPECT_EQ(memcmp(info.cached_header, w.previous.data(),
+			w.previous.size()), 0);
+
+	expect_status(pg_reader_open(w.file, PG_READ_STORED, &w.reader,
+				&w.error),
+		PG_OK, w.error);
+	std::string stored;
+
+	while (stored.size() < w.bytes.size()) {
+		stored += w.chunk(w.reader, 7);
+		expect_status(w.status, PG_OK, w.error);
+		ASSERT_GT(w.count, 0u);
+	}
+	EXPECT_EQ(stored, w.bytes);
+	EXPECT_EQ(w.chunk(w.reader, 1), "");
+	expect_status(w.status, PG_END, w.error);
+	expect_status(pg_reader_close(&w.reader, &w.error), PG_OK, w.error);
+}
+
+THEN("^the unrelated HOGG entry retains its original content$")
+{
+	World &w = world();
+
+	w.select("keep", false);
+	EXPECT_EQ(w.read(w.file), "unchanged");
+}

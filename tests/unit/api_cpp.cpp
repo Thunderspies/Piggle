@@ -62,6 +62,7 @@ CHECK_IMPORT(pg_entry_cursor_close);
 CHECK_IMPORT(pg_reader_read);
 CHECK_IMPORT(pg_reader_close);
 CHECK_IMPORT(pg_writer_open_source);
+CHECK_IMPORT(pg_writer_open_source_stored);
 CHECK_IMPORT(pg_writer_open_file);
 CHECK_IMPORT(pg_writer_open_archive_builder);
 CHECK_IMPORT(pg_writer_open_native);

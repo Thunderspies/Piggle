@@ -195,3 +195,17 @@ Feature: Whole-file sequential transfer and publication
     When I publish the stored entry and read it unchecked
     Then the stored bytes and supplied metadata are preserved
     And a checked stored reader rejects the malformed payload
+
+  @IO-029
+  Scenario Outline: Update an existing HOGG with accepted stored bytes
+    Given an existing writable HOGG prepared for <operation>
+    When I publish a <encoding> stored payload with a cached header
+    Then the reopened HOGG contains the exact <encoding> payload and header
+    And the unrelated HOGG entry retains its original content
+
+    Examples:
+      | operation   | encoding |
+      | addition    | raw      |
+      | addition    | zlib     |
+      | replacement | raw      |
+      | replacement | zlib     |

@@ -598,6 +598,34 @@ static pg_status pg_builder_options_check(
 	return PG_OK;
 }
 
+static pg_status pg_writer_stored_options(
+	const pg_stored_write_options *stored, uint32_t format,
+	uint32_t checksum_domain, pg_write_options *options)
+{
+	if (stored->checksum_domain != checksum_domain ||
+		(stored->digest_kind != PG_DIGEST_MD5 &&
+			stored->digest_kind != PG_DIGEST_MD5_32) ||
+		(format == PG_PIGG2 && stored->digest_kind != PG_DIGEST_MD5) ||
+		(stored->encoding == PG_ZLIB && !stored->logical_size))
+		return PG_INVALID;
+
+	options->logical_size = stored->logical_size;
+	options->input_size = stored->stored_size;
+	options->encoding = stored->encoding;
+	pg_entry_options *entry = &options->entry;
+
+	entry->compression = PG_COMPRESS_NEVER;
+	entry->mtime = stored->mtime;
+	entry->digest_kind = stored->digest_kind;
+	entry->expected_digest_domain = stored->checksum_domain;
+	memcpy(entry->expected_digest, stored->digest, sizeof(stored->digest));
+	entry->original_name = stored->original_name;
+	entry->cached_header = stored->cached_header;
+	entry->cached_header_size = stored->cached_header_size;
+	entry->cached_header_policy = PG_HEADER_CACHE_EXPLICIT;
+	return PG_OK;
+}
+
 static void pg_writer_release_memory(pg_writer *writer)
 {
 	free(writer->pending_entry);
@@ -2086,6 +2114,55 @@ PG_API pg_status PG_CALL pg_writer_open_source(pg_source *destination,
 	return status;
 }
 
+PG_API pg_status PG_CALL pg_writer_open_source_stored(
+	pg_source *destination, const char *name,
+	const pg_stored_write_options *options, pg_writer **out,
+	pg_error *error)
+{
+	if (!out)
+		return pg_result(PG_INVALID, error);
+	*out = NULL;
+	if (!destination || !name || !options)
+		return pg_result(PG_INVALID, error);
+	pg_context *context = destination->context;
+
+	pg_context_lock(context);
+	pg_source_lock(destination);
+	auto coordinated = [&]() -> pg_status {
+		if (destination->access != PG_WRITE)
+			return pg_result(PG_READ_ONLY, error);
+		pg_status status = pg_source_control_status(destination, 1);
+
+		if (status != PG_OK)
+			return pg_result(status, error);
+		if (destination->format != PG_HOGG10)
+			return pg_result(PG_UNSUPPORTED, error);
+		pg_write_options effective = {};
+
+		status = pg_writer_stored_options(options, destination->format,
+			destination->checksum_domain, &effective);
+		if (status != PG_OK)
+			return pg_result(status, error);
+		/* The all-ones stored size marks an unused HOGG record. */
+		if (options->stored_size >= UINT32_MAX)
+			return pg_result(PG_LIMIT, error);
+		pg_writer *writer = NULL;
+
+		status = pg_writer_open_archive_source(destination, name,
+			&effective, &writer, error, NULL);
+		if (status == PG_OK) {
+			writer->stored_unchecked = 1;
+			*out = writer;
+		}
+		return status;
+	};
+	pg_status status = coordinated();
+
+	pg_source_unlock(destination);
+	pg_context_unlock(context);
+	return status;
+}
+
 /* Stage a replacement for one captured loose-file identity. */
 PG_API pg_status PG_CALL pg_writer_open_file(pg_file *file,
 	const pg_write_options *options, pg_writer **out,
@@ -2960,31 +3037,16 @@ PG_API pg_status PG_CALL pg_writer_open_archive_builder_stored(
 	if (!out)
 		return pg_result(PG_INVALID, error);
 	*out = NULL;
-	if (!builder || !options ||
-		options->checksum_domain != builder->checksum_domain ||
-		(options->digest_kind != PG_DIGEST_MD5 &&
-			options->digest_kind != PG_DIGEST_MD5_32) ||
-		(builder->format == PG_PIGG2 &&
-			options->digest_kind != PG_DIGEST_MD5) ||
-		(options->encoding == PG_ZLIB &&
-			!options->logical_size))
+	if (!builder || !options)
 		return pg_result(PG_INVALID, error);
-	pg_write_options checked = {};
+	pg_write_options effective = {};
+	pg_status status = pg_writer_stored_options(options, builder->format,
+		builder->checksum_domain, &effective);
 
-	checked.logical_size = options->logical_size;
-	checked.input_size = options->stored_size;
-	checked.encoding = options->encoding;
-	checked.entry.compression = PG_COMPRESS_NEVER;
-	checked.entry.mtime = options->mtime;
-	checked.entry.digest_kind = options->digest_kind;
-	checked.entry.expected_digest_domain = options->checksum_domain;
-	memcpy(checked.entry.expected_digest, options->digest, 16);
-	checked.entry.original_name = options->original_name;
-	checked.entry.cached_header = options->cached_header;
-	checked.entry.cached_header_size = options->cached_header_size;
-	checked.entry.cached_header_policy = PG_HEADER_CACHE_EXPLICIT;
-	pg_status status = pg_writer_open_archive_builder(builder, name,
-		&checked, out, error);
+	if (status != PG_OK)
+		return pg_result(status, error);
+	status = pg_writer_open_archive_builder(builder, name,
+		&effective, out, error);
 
 	if (status == PG_OK)
 		(*out)->stored_unchecked = 1;

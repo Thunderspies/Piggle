@@ -91,7 +91,9 @@ int piggle_c11_contract(void)
 	pg_writer *writer = NULL;
 
 	if (pg_writer_open_archive_builder_stored(NULL, "a", &stored,
-		&writer, &contract_error) != PG_INVALID || writer)
+		&writer, &contract_error) != PG_INVALID || writer ||
+		pg_writer_open_source_stored(NULL, "a", &stored,
+			&writer, &contract_error) != PG_INVALID || writer)
 		return 1;
 	pg_context *context = NULL;
 	pg_error error;
